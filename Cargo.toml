@@ -1,0 +1,24 @@
+[package]
+name = "ircx-sspi"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "ircx-sspi-test"
+path = "src/main.rs"
+
+[[bin]]
+name = "ircx-sspi-server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "ircx-sspi-client"
+path = "src/bin/client.rs"
+
+[dependencies]
+md-5 = "0.10.6"
+hmac = "0.12.1"
+sspi = "0.21.0"
