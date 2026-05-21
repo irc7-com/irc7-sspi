@@ -541,6 +541,11 @@ fn dump_buffer(name: &str, buf: &[u8]) {
 fn main() {
     print_header("MSN CHAT SSPI DLL NATIVE HANDSHAKE SIMULATION SUITE");
 
+    // Ensure the default user "TestUser" exists in the vault for the integration tests
+    if let Err(e) = ircx_sspi::vault::add_user_to_vault("TestUser", "password", "", ircx_sspi::vault::UserLevel::Admin) {
+        eprintln!("Warning: Failed to setup test user in vault: {:?}", e);
+    }
+
     // Load the DLL dynamically
     let sspi = SspiInterface::load();
     print_success("SSPI DLL dynamically loaded and InitSecurityInterfaceA resolved.");
@@ -1254,7 +1259,7 @@ fn test_ntlm_handshake(sspi: &SspiInterface) {
         sspi.query_context_attributes(&server_ctx_2, ircx_sspi::dll::SECPKG_ATTR_NAMES).unwrap()
     };
     print_info(&format!("Retrieved NTLM Username: {}", username));
-    assert_eq!(username, "user");
+    assert_eq!(username, "TestUser");
 
     print_success("NTLM challenge-response handshake succeeded!");
 
@@ -1430,7 +1435,7 @@ fn test_ntlm_passport_handshake(sspi: &SspiInterface) {
         sspi.query_context_attributes(&server_ctx_3, ircx_sspi::dll::SECPKG_ATTR_NAMES).unwrap()
     };
     print_info(&format!("Retrieved NTLMPassport Username: {}", username));
-    assert_eq!(username, "user+PassportUser");
+    assert_eq!(username, "TestUser+PassportUser");
 
     print_success("NTLMPassport dual state-machine authentication verified!");
 

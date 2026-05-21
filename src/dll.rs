@@ -730,10 +730,44 @@ pub unsafe extern "system" fn QueryContextAttributesA(
                 }
             }
             0x5000 | 0x6000 => {
-                Some("user".to_string())
+                let sessions = providers.ntlm.sessions.lock().unwrap();
+                if let Some(s) = sessions.get(ctx) {
+                    s.authenticated_username.clone()
+                } else {
+                    Some("user".to_string())
+                }
             }
             0x7000 | 0x8000 => {
-                Some("user+PassportUser".to_string())
+                let sessions = providers.ntlm_passport.sessions.lock().unwrap();
+                if let Some(comb) = sessions.get(ctx) {
+                    let mut ntlm_name = None;
+                    if let Some(ntlm_ctx) = comb.slot0_context {
+                        let ntlm_sessions = providers.ntlm_passport.sub_ntlm.sessions.lock().unwrap();
+                        if let Some(s) = ntlm_sessions.get(&ntlm_ctx) {
+                            ntlm_name = s.authenticated_username.clone();
+                        }
+                    }
+                    let mut passport_name = None;
+                    if let Some(pass_ctx) = comb.slot1_context {
+                        let pass_sessions = providers.ntlm_passport.sub_passport.sessions.lock().unwrap();
+                        if let Some(s) = pass_sessions.get(&pass_ctx) {
+                            if !s.client_info.is_empty() {
+                                passport_name = Some(s.client_info.clone());
+                            }
+                        }
+                    }
+                    if passport_name.is_none() && comb.slot1_context.is_some() {
+                        passport_name = Some("PassportUser".to_string());
+                    }
+                    match (ntlm_name, passport_name) {
+                        (Some(n), Some(p)) => Some(format!("{}+{}", n, p)),
+                        (Some(n), None) => Some(n),
+                        (None, Some(p)) => Some(p),
+                        _ => Some("user+PassportUser".to_string()),
+                    }
+                } else {
+                    Some("user+PassportUser".to_string())
+                }
             }
             _ => None,
         };
@@ -836,10 +870,44 @@ pub unsafe extern "system" fn QueryContextAttributesW(
                 }
             }
             0x5000 | 0x6000 => {
-                Some("user".to_string())
+                let sessions = providers.ntlm.sessions.lock().unwrap();
+                if let Some(s) = sessions.get(ctx) {
+                    s.authenticated_username.clone()
+                } else {
+                    Some("user".to_string())
+                }
             }
             0x7000 | 0x8000 => {
-                Some("user+PassportUser".to_string())
+                let sessions = providers.ntlm_passport.sessions.lock().unwrap();
+                if let Some(comb) = sessions.get(ctx) {
+                    let mut ntlm_name = None;
+                    if let Some(ntlm_ctx) = comb.slot0_context {
+                        let ntlm_sessions = providers.ntlm_passport.sub_ntlm.sessions.lock().unwrap();
+                        if let Some(s) = ntlm_sessions.get(&ntlm_ctx) {
+                            ntlm_name = s.authenticated_username.clone();
+                        }
+                    }
+                    let mut passport_name = None;
+                    if let Some(pass_ctx) = comb.slot1_context {
+                        let pass_sessions = providers.ntlm_passport.sub_passport.sessions.lock().unwrap();
+                        if let Some(s) = pass_sessions.get(&pass_ctx) {
+                            if !s.client_info.is_empty() {
+                                passport_name = Some(s.client_info.clone());
+                            }
+                        }
+                    }
+                    if passport_name.is_none() && comb.slot1_context.is_some() {
+                        passport_name = Some("PassportUser".to_string());
+                    }
+                    match (ntlm_name, passport_name) {
+                        (Some(n), Some(p)) => Some(format!("{}+{}", n, p)),
+                        (Some(n), None) => Some(n),
+                        (None, Some(p)) => Some(p),
+                        _ => Some("user+PassportUser".to_string()),
+                    }
+                } else {
+                    Some("user+PassportUser".to_string())
+                }
             }
             _ => None,
         };

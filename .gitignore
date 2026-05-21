@@ -1,12 +1,17 @@
+# Rust
 /target
 
 # C# / .NET / Visual Studio
-[Bb]in/
-[Ob]j/
-.vs/
-*.user
-*.userosscache
-*.sln.docstates
-*.suo
-*.suo.tmp
-*.userprefs
+/examples/**/[Bb]in/
+/examples/**/[Ob]j/
+/examples/**/.vs/
+/examples/**/*.user
+/examples/**/*.userosscache
+/examples/**/*.sln.docstates
+/examples/**/*.suo
+/examples/**/*.suo.tmp
+/examples/**/*.userprefs
+
+# Vault / Crypto
+master.key
+credentials.vault

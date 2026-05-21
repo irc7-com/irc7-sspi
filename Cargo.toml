@@ -18,9 +18,22 @@ path = "src/bin/server.rs"
 name = "ircx-sspi-client"
 path = "src/bin/client.rs"
 
+[[bin]]
+name = "ircx-sspi-gui"
+path = "src/bin/gui.rs"
+
 [dependencies]
 md-5 = "0.10.6"
 hmac = "0.12.1"
 md4 = "0.10.2"
 sspi = "0.21.0"
+aes-gcm = "0.10.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+zeroize = { version = "1.8.1", features = ["derive"] }
+hex = "0.4.3"
+rand = "0.8"
+getrandom = { version = "0.2", features = ["js"] }
+eframe = "0.27.2"
+
 

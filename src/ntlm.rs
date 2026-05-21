@@ -27,9 +27,14 @@ pub struct NtlmSession {
     pub creds_handle: <sspi::Ntlm as sspi::SspiImpl>::CredentialsHandle,
     /// The 8-byte server challenge generated during server leg 1.
     pub server_challenge: Option<[u8; 8]>,
-    /// The expected credentials configured for this session.
-    pub expected_username: Option<String>,
-    pub expected_password: Option<String>,
+    /// The TargetName sent by the server in the Type 2 challenge message.
+    pub server_target_name: Option<String>,
+    /// The authenticated username post-handshake
+    pub authenticated_username: Option<String>,
+    /// The authenticated user level post-handshake
+    pub authenticated_level: Option<crate::vault::UserLevel>,
+    /// The authenticated domain post-handshake
+    pub authenticated_domain: Option<String>,
 }
 
 
@@ -151,7 +156,7 @@ impl SecurityProvider for NtlmSecurityProvider {
 
                 // Setup fallback credentials for cross-platform NTLM authentication
                 let identity = sspi::AuthIdentity {
-                    username: sspi::Username::new("user", None).unwrap(),
+                    username: sspi::Username::new("TestUser", None).unwrap(),
                     password: "password".to_string().into(),
                 };
 
@@ -191,8 +196,10 @@ impl SecurityProvider for NtlmSecurityProvider {
                     ntlm,
                     creds_handle: acq_res.credentials_handle,
                     server_challenge: None,
-                    expected_username: None,
-                    expected_password: None,
+                    server_target_name: None,
+                    authenticated_username: None,
+                    authenticated_level: None,
+                    authenticated_domain: None,
                 });
 
                 // Return mapped status
@@ -263,16 +270,9 @@ impl SecurityProvider for NtlmSecurityProvider {
                 // Server Step 1: Receive client negotiate message and produce server challenge
                 let mut ntlm = sspi::Ntlm::new();
 
-                // Setup server-side expected credentials for NTLM authentication
-                let identity = sspi::AuthIdentity {
-                    username: sspi::Username::new("user", None).unwrap(),
-                    password: "password".to_string().into(),
-                };
-
                 // Acquire server-side credentials handle
                 let mut acq_res = ntlm.acquire_credentials_handle()
                     .with_credential_use(sspi::CredentialUse::Inbound)
-                    .with_auth_data(&identity)
                     .execute(&mut ntlm)
                     .map_err(|_| SspiError::UnknownCredentials)?;
 
@@ -303,13 +303,25 @@ impl SecurityProvider for NtlmSecurityProvider {
                 *handle_id += 1;
                 *new_context = ctxt;
 
-                // Extract server challenge from output token (bytes 24..32 in Type 2 message)
+                // Extract server challenge and target name from output token
                 let mut server_challenge = None;
+                let mut server_target_name = None;
                 if let Some(s_buf) = output_sspi.iter().find(|b| b.buffer_type.buffer_type == sspi::BufferType::Token) {
-                    if s_buf.buffer.len() >= 32 {
+                    let msg = &s_buf.buffer;
+                    if msg.len() >= 32 {
                         let mut challenge = [0u8; 8];
-                        challenge.copy_from_slice(&s_buf.buffer[24..32]);
+                        challenge.copy_from_slice(&msg[24..32]);
                         server_challenge = Some(challenge);
+
+                        // Parse TargetName from Type 2 message if available
+                        if msg.starts_with(b"NTLMSSP\0") && msg.len() >= 20 {
+                            if let Ok(desc) = parse_descriptor(msg, 12) {
+                                if desc.offset + desc.length <= msg.len() {
+                                    let target_name = decode_utf16le(&msg[desc.offset .. desc.offset + desc.length]);
+                                    server_target_name = Some(target_name);
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -318,8 +330,10 @@ impl SecurityProvider for NtlmSecurityProvider {
                     ntlm,
                     creds_handle: acq_res.credentials_handle,
                     server_challenge,
-                    expected_username: Some("user".to_string()),
-                    expected_password: Some("password".to_string()),
+                    server_target_name,
+                    authenticated_username: None,
+                    authenticated_level: None,
+                    authenticated_domain: None,
                 });
 
                 // Return mapped status
@@ -379,20 +393,90 @@ impl SecurityProvider for NtlmSecurityProvider {
                 let temp_blob = &nt_resp[16..];
 
                 let server_challenge = session.server_challenge.ok_or(SspiError::LogonDenied)?;
-                let expected_username = session.expected_username.as_deref().unwrap_or("user");
-                let expected_password = session.expected_password.as_deref().ok_or(SspiError::LogonDenied)?;
 
-                if username.to_lowercase() != expected_username.to_lowercase() {
+                 let key = match crate::vault::load_master_key() {
+                    Ok(k) => k,
+                    Err(e) => {
+                        println!("ERROR: failed to load master key: {:?}", e);
+                        return Err(SspiError::LogonDenied);
+                    }
+                };
+                let map = match crate::vault::load_and_decrypt_vault(&key) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        println!("ERROR: failed to load/decrypt vault: {:?}", e);
+                        return Err(SspiError::LogonDenied);
+                    }
+                };
+                let account = match map.get(&username.to_lowercase()) {
+                    Some(a) => a,
+                    None => {
+                        println!("ERROR: username not found in vault: '{}'. Loaded keys: {:?}", username, map.keys().collect::<Vec<_>>());
+                        return Err(SspiError::LogonDenied);
+                    }
+                };
+
+                // Enforce domain validation and build candidate list for proof verification.
+                // - No domain in vault: accept only "" and "." from the client.
+                // - Domain in vault: require case-insensitive match against the stored domain.
+                let client_domain_trimmed = domain.trim();
+                let mut candidate_domains = Vec::new();
+
+                if account.domain.is_empty() {
+                    // No domain stored: only "" and "." are valid
+                    if !client_domain_trimmed.is_empty() && client_domain_trimmed != "." {
+                        println!("ERROR: Domain mismatch: client='{}', db='' (expected empty or '.')", domain);
+                        return Err(SspiError::LogonDenied);
+                    }
+                    candidate_domains.push("".to_string());
+                    candidate_domains.push(".".to_string());
+                } else {
+                    // Domain stored: case-insensitive match required
+                    if !client_domain_trimmed.eq_ignore_ascii_case(account.domain.trim()) {
+                        println!("ERROR: Domain mismatch: client='{}', db='{}'", domain, account.domain);
+                        return Err(SspiError::LogonDenied);
+                    }
+                    // Use the client-provided casing (what the client used to compute their proof)
+                    candidate_domains.push(domain.clone());
+                }
+
+                let mut nt_hash = [0u8; 16];
+                if hex::decode_to_slice(&account.nt_hash, &mut nt_hash).is_err() {
+                    println!("ERROR: failed to hex decode NT hash");
                     return Err(SspiError::LogonDenied);
                 }
 
-                let nt_hash = calculate_nt_hash(expected_password);
-                let ntlmv2_hash = calculate_ntlmv2_hash(&username, &domain, &nt_hash);
-                let expected_proof = calculate_ntlmv2_proof(&ntlmv2_hash, &server_challenge, temp_blob);
+                // Ephemerally hold decrypted hash in zeroizing container
+                let sam_package = crate::internal::sam::SamPackage::new(username.clone(), nt_hash);
 
-                if client_proof != expected_proof {
+                let mut is_valid = false;
+
+                for candidate in &candidate_domains {
+                    let ntlmv2_hash = calculate_ntlmv2_hash(&sam_package.username, candidate, &sam_package.nt_hash);
+                    let proof = calculate_ntlmv2_proof(&ntlmv2_hash, &server_challenge, temp_blob);
+                    if client_proof == proof {
+                        is_valid = true;
+                        break;
+                    }
+                }
+
+                if !is_valid {
+                    // Try to print the client-supplied domain proof expectation for error diagnostics
+                    let ntlmv2_hash = calculate_ntlmv2_hash(&sam_package.username, &domain, &sam_package.nt_hash);
+                    let expected_proof = calculate_ntlmv2_proof(&ntlmv2_hash, &server_challenge, temp_blob);
+                    println!("ERROR: Client proof mismatch! expected={:?}, got={:?}", expected_proof, client_proof);
+                }
+
+                // Explicitly drop/zeroize plain credentials post-handshake
+                drop(sam_package);
+
+                if !is_valid {
                     return Err(SspiError::LogonDenied);
                 }
+
+                session.authenticated_username = Some(account.username.clone());
+                session.authenticated_level = Some(account.level);
+                session.authenticated_domain = Some(account.domain.clone());
 
                 // Copy output tokens
                 from_sspi_buffers(&output_sspi, output_buffers);
@@ -435,9 +519,10 @@ pub fn calculate_nt_hash(password: &str) -> [u8; 16] {
 
 pub fn calculate_ntlmv2_hash(username: &str, domain: &str, nt_hash: &[u8; 16]) -> [u8; 16] {
     let upper_user = username.to_uppercase();
-    let upper_domain = domain.to_uppercase();
+    // Per MS-NLMP spec: HMAC_MD5(NT_Hash, UNICODE(Uppercase(Username) + UserDomain))
+    // Only the username is uppercased; the domain is used as-is.
     let mut identity = to_utf16le(&upper_user);
-    identity.extend_from_slice(&to_utf16le(&upper_domain));
+    identity.extend_from_slice(&to_utf16le(domain));
 
     let mut mac = HmacMd5::new_from_slice(nt_hash).unwrap();
     mac.update(&identity);

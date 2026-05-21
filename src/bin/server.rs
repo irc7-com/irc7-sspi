@@ -184,6 +184,11 @@ enum AuthOutcome {
 }
 
 fn main() {
+    if let Err(e) = ircx_sspi::vault::ensure_master_key() {
+        eprintln!("Failed to ensure master key: {:?}", e);
+        std::process::exit(1);
+    }
+
     let mut listeners = Vec::new();
 
     // Try IPv6 wildcard first (which might support dual-stack IPv4/IPv6 depending on OS)
@@ -686,14 +691,15 @@ fn get_username(
             "GateKeeperPassportUser".to_string()
         }
     } else if package == "NTLM" {
-        let mut sessions = auth.ntlm_provider.sessions.lock().unwrap();
-        if let Some(s) = sessions.get_mut(context) {
-            use sspi::Sspi;
-            if let Ok(names) = s.ntlm.query_context_names() {
-                names.username.account_name().to_string()
-            } else {
-                "NtlmUser".to_string()
+        let sessions = auth.ntlm_provider.sessions.lock().unwrap();
+        if let Some(s) = sessions.get(context) {
+            let uname = s.authenticated_username.clone().unwrap_or_else(|| "NtlmUser".to_string());
+            let domain = s.authenticated_domain.clone().unwrap_or_default();
+            if let Some(level) = s.authenticated_level {
+                println!("[AUTH] Verified NTLM user '{}' [Domain: '{}', Level: '{}']", uname, domain, level);
             }
+            let display_domain = if domain.is_empty() { "localhost".to_string() } else { domain };
+            return format!("{}@{}", uname, display_domain);
         } else {
             "NtlmUser".to_string()
         }
@@ -701,12 +707,14 @@ fn get_username(
         let sessions = auth.ntlm_passport_provider.sessions.lock().unwrap();
         if let Some(comb) = sessions.get(context) {
             let mut ntlm_name = None;
+            let mut ntlm_domain = None;
             if let Some(ntlm_ctx) = comb.slot0_context {
-                let mut ntlm_sessions = auth.ntlm_passport_provider.sub_ntlm.sessions.lock().unwrap();
-                if let Some(s) = ntlm_sessions.get_mut(&ntlm_ctx) {
-                    use sspi::Sspi;
-                    if let Ok(names) = s.ntlm.query_context_names() {
-                        ntlm_name = Some(names.username.account_name().to_string());
+                let ntlm_sessions = auth.ntlm_passport_provider.sub_ntlm.sessions.lock().unwrap();
+                if let Some(s) = ntlm_sessions.get(&ntlm_ctx) {
+                    ntlm_name = s.authenticated_username.clone();
+                    ntlm_domain = s.authenticated_domain.clone();
+                    if let (Some(level), Some(domain)) = (s.authenticated_level, &s.authenticated_domain) {
+                        println!("[AUTH] Verified NTLMPassport sub-NTLM user '{}' [Domain: '{}', Level: '{}']", s.authenticated_username.as_deref().unwrap_or(""), domain, level);
                     }
                 }
             }
@@ -726,12 +734,17 @@ fn get_username(
             if passport_name.is_none() && comb.slot1_context.is_some() {
                 passport_name = Some("PassportUser".to_string());
             }
-            match (ntlm_name, passport_name) {
+            let display_domain = match &ntlm_domain {
+                Some(d) if !d.is_empty() => d.clone(),
+                _ => "localhost".to_string(),
+            };
+            let ntlm_part = match (ntlm_name, passport_name) {
                 (Some(n), Some(p)) => format!("{}+{}", n, p),
                 (Some(n), None) => n,
                 (None, Some(p)) => p,
                 _ => "NtlmUser+PassportUser".to_string(),
-            }
+            };
+            return format!("{}@{}", ntlm_part, display_domain);
         } else {
             "NtlmUser+PassportUser".to_string()
         }

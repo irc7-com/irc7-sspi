@@ -8,6 +8,26 @@ pub mod gatekeeper;
 pub mod ntlm;
 pub mod gatekeeper_passport;
 pub mod ntlm_passport;
+pub mod vault;
+
+pub mod internal {
+    pub mod sam {
+        use zeroize::Zeroize;
+
+        #[derive(Zeroize)]
+        #[zeroize(drop)]
+        pub struct SamPackage {
+            pub username: String,
+            pub nt_hash: [u8; 16],
+        }
+
+        impl SamPackage {
+            pub fn new(username: String, nt_hash: [u8; 16]) -> Self {
+                Self { username, nt_hash }
+            }
+        }
+    }
+}
 
 // Flat public re-exports so that external dependencies can still import
 // from the root: `use ircx_sspi::{SecurityProvider, CredHandle, ...}`
@@ -20,3 +40,4 @@ pub use gatekeeper_passport::GateKeeperPassportSecurityProvider;
 pub use ntlm_passport::NtlmPassportSecurityProvider;
 
 pub mod dll;
+
