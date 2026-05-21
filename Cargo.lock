@@ -900,6 +900,7 @@ version = "0.1.0"
 dependencies = [
  "hmac 0.12.1",
  "md-5 0.10.6",
+ "md4",
  "sspi",
 ]
 

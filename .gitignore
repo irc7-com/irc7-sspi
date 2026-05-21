@@ -1,1 +1,12 @@
 /target
+
+# C# / .NET / Visual Studio
+[Bb]in/
+[Ob]j/
+.vs/
+*.user
+*.userosscache
+*.sln.docstates
+*.suo
+*.suo.tmp
+*.userprefs

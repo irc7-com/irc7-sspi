@@ -7,9 +7,22 @@ use std::thread;
 use std::sync::Arc;
 
 use ircx_sspi::{
-    GateKeeperSecurityProvider, GateKeeperPassportSecurityProvider, SecurityProvider,
-    CredHandle, CtxtHandle, SecBuffer, SecBufferType, SspiError,
+    GateKeeperSecurityProvider, GateKeeperPassportSecurityProvider, NtlmSecurityProvider,
+    NtlmPassportSecurityProvider, SecurityProvider, CredHandle, CtxtHandle, SecBuffer,
+    SecBufferType, SspiError,
 };
+
+#[derive(Clone)]
+struct ServerAuth {
+    gk_provider: Arc<GateKeeperSecurityProvider>,
+    gkp_provider: Arc<GateKeeperPassportSecurityProvider>,
+    ntlm_provider: Arc<NtlmSecurityProvider>,
+    ntlm_passport_provider: Arc<NtlmPassportSecurityProvider>,
+    gk_cred: CredHandle,
+    gkp_cred: CredHandle,
+    ntlm_cred: CredHandle,
+    ntlm_passport_cred: CredHandle,
+}
 
 /// Helper to unescape specialized characters inside the IRC/MSN client-auth payload.
 fn unescape(s: &[u8]) -> Vec<u8> {
@@ -102,7 +115,7 @@ fn parse_auth_line(line: &[u8]) -> Option<(String, char, Vec<u8>)> {
     let space1 = rest.iter().position(|&x| x == b' ')?;
     let package_bytes = &rest[..space1];
     let package = String::from_utf8_lossy(package_bytes).into_owned();
-    if package != "GateKeeper" && package != "GateKeeperPassport" {
+    if package != "GateKeeper" && package != "GateKeeperPassport" && package != "NTLM" && package != "NTLMPassport" {
         return None;
     }
     
@@ -225,6 +238,8 @@ fn main() {
 
     let gk_provider = Arc::new(GateKeeperSecurityProvider::new());
     let gkp_provider = Arc::new(GateKeeperPassportSecurityProvider::new());
+    let ntlm_provider = Arc::new(NtlmSecurityProvider::new());
+    let ntlm_passport_provider = Arc::new(NtlmPassportSecurityProvider::new());
     
     let mut gk_cred = CredHandle::default();
     gk_provider.acquire_credentials_handle(None, "GateKeeper", 2, None, &mut gk_cred)
@@ -234,23 +249,36 @@ fn main() {
     gkp_provider.acquire_credentials_handle(None, "GateKeeperPassport", 2, None, &mut gkp_cred)
         .expect("Failed to acquire GateKeeperPassport credentials");
 
+    let mut ntlm_cred = CredHandle::default();
+    ntlm_provider.acquire_credentials_handle(None, "NTLM", 2, None, &mut ntlm_cred)
+        .expect("Failed to acquire NTLM credentials");
+
+    let mut ntlm_passport_cred = CredHandle::default();
+    ntlm_passport_provider.acquire_credentials_handle(None, "NTLMPassport", 2, None, &mut ntlm_passport_cred)
+        .expect("Failed to acquire NTLMPassport credentials");
+
+    let auth = ServerAuth {
+        gk_provider,
+        gkp_provider,
+        ntlm_provider,
+        ntlm_passport_provider,
+        gk_cred,
+        gkp_cred,
+        ntlm_cred,
+        ntlm_passport_cred,
+    };
+
     let last_listener = listeners.pop().unwrap();
 
     for listener in listeners {
-        let gk_provider = gk_provider.clone();
-        let gkp_provider = gkp_provider.clone();
-        let gk_cred = gk_cred;
-        let gkp_cred = gkp_cred;
+        let auth = auth.clone();
         thread::spawn(move || {
             for stream in listener.incoming() {
                 match stream {
                     Ok(stream) => {
-                        let gk_provider = gk_provider.clone();
-                        let gkp_provider = gkp_provider.clone();
-                        let gk_cred = gk_cred;
-                        let gkp_cred = gkp_cred;
+                        let auth = auth.clone();
                         thread::spawn(move || {
-                            handle_client(stream, gk_provider, gkp_provider, gk_cred, gkp_cred);
+                            handle_client(stream, auth);
                         });
                     }
                     Err(e) => {
@@ -264,12 +292,9 @@ fn main() {
     for stream in last_listener.incoming() {
         match stream {
             Ok(stream) => {
-                let gk_provider = gk_provider.clone();
-                let gkp_provider = gkp_provider.clone();
-                let gk_cred = gk_cred;
-                let gkp_cred = gkp_cred;
+                let auth = auth.clone();
                 thread::spawn(move || {
-                    handle_client(stream, gk_provider, gkp_provider, gk_cred, gkp_cred);
+                    handle_client(stream, auth);
                 });
             }
             Err(e) => {
@@ -281,10 +306,7 @@ fn main() {
 
 fn handle_client(
     mut stream: TcpStream,
-    gk_provider: Arc<GateKeeperSecurityProvider>,
-    gkp_provider: Arc<GateKeeperPassportSecurityProvider>,
-    gk_cred: CredHandle,
-    gkp_cred: CredHandle,
+    auth: ServerAuth,
 ) {
     println!("New connection from: {}", stream.peer_addr().unwrap());
     let mut buffer = [0u8; 4096];
@@ -319,10 +341,7 @@ fn handle_client(
                             &payload,
                             &mut active_package,
                             &mut active_context,
-                            &gk_provider,
-                            &gkp_provider,
-                            &gk_cred,
-                            &gkp_cred,
+                            &auth,
                         );
                         match res {
                             Ok(AuthOutcome::Continue(out_bytes)) => {
@@ -373,7 +392,7 @@ fn handle_client(
         }
     }
     
-    cleanup_session(&mut active_package, &mut active_context, &gk_provider, &gkp_provider);
+    cleanup_session(&mut active_package, &mut active_context, &auth);
 }
  
 fn process_auth(
@@ -382,34 +401,40 @@ fn process_auth(
     payload: &[u8],
     active_package: &mut Option<String>,
     active_context: &mut Option<CtxtHandle>,
-    gk_provider: &GateKeeperSecurityProvider,
-    gkp_provider: &GateKeeperPassportSecurityProvider,
-    gk_cred: &CredHandle,
-    gkp_cred: &CredHandle,
+    auth: &ServerAuth,
 ) -> Result<AuthOutcome, SspiError> {
     let unescaped = unescape(payload);
     
     if stage == 'I' {
-        cleanup_session(active_package, active_context, gk_provider, gkp_provider);
+        cleanup_session(active_package, active_context, auth);
         *active_package = Some(package.to_string());
         
         let mut new_context = CtxtHandle::default();
         let mut context_attr = 0;
         
-        let input_buffers = vec![
-            SecBuffer {
-                buffer_type: SecBufferType::Token,
-                bytes: unescaped,
-            },
-            SecBuffer {
-                buffer_type: SecBufferType::PkgParams,
-                bytes: b"localhost".to_vec(),
-            },
-            SecBuffer {
-                buffer_type: SecBufferType::PkgParams,
-                bytes: vec![1], // Compatibility flag (allow v1/v2)
-            },
-        ];
+        let input_buffers = if package == "GateKeeper" || package == "GateKeeperPassport" {
+            vec![
+                SecBuffer {
+                    buffer_type: SecBufferType::Token,
+                    bytes: unescaped,
+                },
+                SecBuffer {
+                    buffer_type: SecBufferType::PkgParams,
+                    bytes: b"localhost".to_vec(),
+                },
+                SecBuffer {
+                    buffer_type: SecBufferType::PkgParams,
+                    bytes: vec![1], // Compatibility flag (allow v1/v2)
+                },
+            ]
+        } else {
+            vec![
+                SecBuffer {
+                    buffer_type: SecBufferType::Token,
+                    bytes: unescaped,
+                }
+            ]
+        };
         
         let mut output_buffers = vec![
             SecBuffer {
@@ -418,28 +443,56 @@ fn process_auth(
             }
         ];
         
-        let res = if package == "GateKeeper" {
-            gk_provider.accept_security_context(
-                gk_cred,
-                None,
-                &input_buffers,
-                0,
-                16,
-                &mut new_context,
-                &mut output_buffers,
-                &mut context_attr,
-            )
-        } else {
-            gkp_provider.accept_security_context(
-                gkp_cred,
-                None,
-                &input_buffers,
-                0,
-                16,
-                &mut new_context,
-                &mut output_buffers,
-                &mut context_attr,
-            )
+        let res = match package {
+            "GateKeeper" => {
+                auth.gk_provider.accept_security_context(
+                    &auth.gk_cred,
+                    None,
+                    &input_buffers,
+                    0,
+                    16,
+                    &mut new_context,
+                    &mut output_buffers,
+                    &mut context_attr,
+                )
+            }
+            "GateKeeperPassport" => {
+                auth.gkp_provider.accept_security_context(
+                    &auth.gkp_cred,
+                    None,
+                    &input_buffers,
+                    0,
+                    16,
+                    &mut new_context,
+                    &mut output_buffers,
+                    &mut context_attr,
+                )
+            }
+            "NTLM" => {
+                auth.ntlm_provider.accept_security_context(
+                    &auth.ntlm_cred,
+                    None,
+                    &input_buffers,
+                    0,
+                    16,
+                    &mut new_context,
+                    &mut output_buffers,
+                    &mut context_attr,
+                )
+            }
+            "NTLMPassport" => {
+                auth.ntlm_passport_provider.accept_security_context(
+                    &auth.ntlm_passport_cred,
+                    None,
+                    &input_buffers,
+                    0,
+                    16,
+                    &mut new_context,
+                    &mut output_buffers,
+                    &mut context_attr,
+                )
+            }
+            _ => return Err(SspiError::NotSupported),
         };
         
         match res {
@@ -448,11 +501,13 @@ fn process_auth(
                 Ok(AuthOutcome::Continue(output_buffers[0].bytes.clone()))
             }
             Ok(SspiError::Ok) => {
-                let username = get_username(package, &new_context, gk_provider, gkp_provider);
-                let _ = if package == "GateKeeper" {
-                    gk_provider.delete_security_context(&new_context)
-                } else {
-                    gkp_provider.delete_security_context(&new_context)
+                let username = get_username(package, &new_context, auth);
+                let _ = match package {
+                    "GateKeeper" => auth.gk_provider.delete_security_context(&new_context),
+                    "GateKeeperPassport" => auth.gkp_provider.delete_security_context(&new_context),
+                    "NTLM" => auth.ntlm_provider.delete_security_context(&new_context),
+                    "NTLMPassport" => auth.ntlm_passport_provider.delete_security_context(&new_context),
+                    _ => Ok(()),
                 };
                 *active_package = None;
                 Ok(AuthOutcome::Success(username))
@@ -484,28 +539,56 @@ fn process_auth(
         let mut new_context = ctx;
         let mut context_attr = 0;
         
-        let res = if package == "GateKeeper" {
-            gk_provider.accept_security_context(
-                gk_cred,
-                Some(&ctx),
-                &input_buffers,
-                0,
-                16,
-                &mut new_context,
-                &mut output_buffers,
-                &mut context_attr,
-            )
-        } else {
-            gkp_provider.accept_security_context(
-                gkp_cred,
-                Some(&ctx),
-                &input_buffers,
-                0,
-                16,
-                &mut new_context,
-                &mut output_buffers,
-                &mut context_attr,
-            )
+        let res = match package {
+            "GateKeeper" => {
+                auth.gk_provider.accept_security_context(
+                    &auth.gk_cred,
+                    Some(&ctx),
+                    &input_buffers,
+                    0,
+                    16,
+                    &mut new_context,
+                    &mut output_buffers,
+                    &mut context_attr,
+                )
+            }
+            "GateKeeperPassport" => {
+                auth.gkp_provider.accept_security_context(
+                    &auth.gkp_cred,
+                    Some(&ctx),
+                    &input_buffers,
+                    0,
+                    16,
+                    &mut new_context,
+                    &mut output_buffers,
+                    &mut context_attr,
+                )
+            }
+            "NTLM" => {
+                auth.ntlm_provider.accept_security_context(
+                    &auth.ntlm_cred,
+                    Some(&ctx),
+                    &input_buffers,
+                    0,
+                    16,
+                    &mut new_context,
+                    &mut output_buffers,
+                    &mut context_attr,
+                )
+            }
+            "NTLMPassport" => {
+                auth.ntlm_passport_provider.accept_security_context(
+                    &auth.ntlm_passport_cred,
+                    Some(&ctx),
+                    &input_buffers,
+                    0,
+                    16,
+                    &mut new_context,
+                    &mut output_buffers,
+                    &mut context_attr,
+                )
+            }
+            _ => return Err(SspiError::NotSupported),
         };
         
         match res {
@@ -514,22 +597,24 @@ fn process_auth(
                 Ok(AuthOutcome::Continue(output_buffers[0].bytes.clone()))
             }
             Ok(SspiError::Ok) => {
-                let username = get_username(package, &new_context, gk_provider, gkp_provider);
-                let _ = if package == "GateKeeper" {
-                    gk_provider.delete_security_context(&new_context)
-                } else {
-                    gkp_provider.delete_security_context(&new_context)
+                let username = get_username(package, &new_context, auth);
+                let _ = match package {
+                    "GateKeeper" => auth.gk_provider.delete_security_context(&new_context),
+                    "GateKeeperPassport" => auth.gkp_provider.delete_security_context(&new_context),
+                    "NTLM" => auth.ntlm_provider.delete_security_context(&new_context),
+                    "NTLMPassport" => auth.ntlm_passport_provider.delete_security_context(&new_context),
+                    _ => Ok(()),
                 };
                 *active_context = None;
                 *active_package = None;
                 Ok(AuthOutcome::Success(username))
             }
             Ok(other) => {
-                cleanup_session(active_package, active_context, gk_provider, gkp_provider);
+                cleanup_session(active_package, active_context, auth);
                 Err(other)
             }
             Err(e) => {
-                cleanup_session(active_package, active_context, gk_provider, gkp_provider);
+                cleanup_session(active_package, active_context, auth);
                 Err(e)
             }
         }
@@ -541,16 +626,17 @@ fn process_auth(
 fn cleanup_session(
     active_package: &mut Option<String>,
     active_context: &mut Option<CtxtHandle>,
-    gk_provider: &GateKeeperSecurityProvider,
-    gkp_provider: &GateKeeperPassportSecurityProvider,
+    auth: &ServerAuth,
 ) {
     if let Some(ctx) = active_context.take() {
         if let Some(pkg) = active_package.as_ref() {
-            if pkg == "GateKeeper" {
-                let _ = gk_provider.delete_security_context(&ctx);
-            } else if pkg == "GateKeeperPassport" {
-                let _ = gkp_provider.delete_security_context(&ctx);
-            }
+            let _ = match pkg.as_str() {
+                "GateKeeper" => auth.gk_provider.delete_security_context(&ctx),
+                "GateKeeperPassport" => auth.gkp_provider.delete_security_context(&ctx),
+                "NTLM" => auth.ntlm_provider.delete_security_context(&ctx),
+                "NTLMPassport" => auth.ntlm_passport_provider.delete_security_context(&ctx),
+                _ => Ok(()),
+            };
         }
     }
     *active_package = None;
@@ -559,29 +645,28 @@ fn cleanup_session(
 fn get_username(
     package: &str,
     context: &CtxtHandle,
-    gk_provider: &GateKeeperSecurityProvider,
-    gkp_provider: &GateKeeperPassportSecurityProvider,
+    auth: &ServerAuth,
 ) -> String {
     let base_name = if package == "GateKeeper" {
-        let sessions = gk_provider.sessions.lock().unwrap();
+        let sessions = auth.gk_provider.sessions.lock().unwrap();
         if let Some(s) = sessions.get(context) {
             ircx_sspi::dll::format_gatekeeper_id(&s.gatekeeper_id)
         } else {
             "GateKeeperUser".to_string()
         }
-    } else {
-        let sessions = gkp_provider.sessions.lock().unwrap();
+    } else if package == "GateKeeperPassport" {
+        let sessions = auth.gkp_provider.sessions.lock().unwrap();
         if let Some(comb) = sessions.get(context) {
             let mut gk_name = None;
             if let Some(gk_ctx) = comb.slot0_context {
-                let gk_sessions = gkp_provider.sub_gk.sessions.lock().unwrap();
+                let gk_sessions = auth.gkp_provider.sub_gk.sessions.lock().unwrap();
                 if let Some(s) = gk_sessions.get(&gk_ctx) {
                     gk_name = Some(ircx_sspi::dll::format_gatekeeper_id(&s.gatekeeper_id));
                 }
             }
             let mut passport_name = None;
             if let Some(pass_ctx) = comb.slot1_context {
-                let pass_sessions = gkp_provider.sub_passport.sessions.lock().unwrap();
+                let pass_sessions = auth.gkp_provider.sub_passport.sessions.lock().unwrap();
                 if let Some(s) = pass_sessions.get(&pass_ctx) {
                     if !s.client_info.is_empty() {
                         passport_name = Some(s.client_info.clone());
@@ -600,6 +685,58 @@ fn get_username(
         } else {
             "GateKeeperPassportUser".to_string()
         }
+    } else if package == "NTLM" {
+        let mut sessions = auth.ntlm_provider.sessions.lock().unwrap();
+        if let Some(s) = sessions.get_mut(context) {
+            use sspi::Sspi;
+            if let Ok(names) = s.ntlm.query_context_names() {
+                names.username.account_name().to_string()
+            } else {
+                "NtlmUser".to_string()
+            }
+        } else {
+            "NtlmUser".to_string()
+        }
+    } else if package == "NTLMPassport" {
+        let sessions = auth.ntlm_passport_provider.sessions.lock().unwrap();
+        if let Some(comb) = sessions.get(context) {
+            let mut ntlm_name = None;
+            if let Some(ntlm_ctx) = comb.slot0_context {
+                let mut ntlm_sessions = auth.ntlm_passport_provider.sub_ntlm.sessions.lock().unwrap();
+                if let Some(s) = ntlm_sessions.get_mut(&ntlm_ctx) {
+                    use sspi::Sspi;
+                    if let Ok(names) = s.ntlm.query_context_names() {
+                        ntlm_name = Some(names.username.account_name().to_string());
+                    }
+                }
+            }
+            if ntlm_name.is_none() {
+                ntlm_name = Some("NtlmUser".to_string());
+            }
+            
+            let mut passport_name = None;
+            if let Some(pass_ctx) = comb.slot1_context {
+                let pass_sessions = auth.ntlm_passport_provider.sub_passport.sessions.lock().unwrap();
+                if let Some(s) = pass_sessions.get(&pass_ctx) {
+                    if !s.client_info.is_empty() {
+                        passport_name = Some(s.client_info.clone());
+                    }
+                }
+            }
+            if passport_name.is_none() && comb.slot1_context.is_some() {
+                passport_name = Some("PassportUser".to_string());
+            }
+            match (ntlm_name, passport_name) {
+                (Some(n), Some(p)) => format!("{}+{}", n, p),
+                (Some(n), None) => n,
+                (None, Some(p)) => p,
+                _ => "NtlmUser+PassportUser".to_string(),
+            }
+        } else {
+            "NtlmUser+PassportUser".to_string()
+        }
+    } else {
+        "UnknownUser".to_string()
     };
     format!("{}@{}", base_name, package)
 }

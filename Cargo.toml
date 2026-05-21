@@ -21,4 +21,6 @@ path = "src/bin/client.rs"
 [dependencies]
 md-5 = "0.10.6"
 hmac = "0.12.1"
+md4 = "0.10.2"
 sspi = "0.21.0"
+

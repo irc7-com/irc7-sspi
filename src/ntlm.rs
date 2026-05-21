@@ -12,6 +12,11 @@ use std::sync::{Arc, Mutex};
 use sspi::{Sspi, SspiImpl};
 use crate::types::{SspiError, CredHandle, CtxtHandle, SecBufferType, SecBuffer, SecurityProvider};
 use crate::default::DefaultSecurityProvider;
+use md4::{Md4, Digest as Md4Digest};
+use md5::Md5;
+use hmac::{Hmac, Mac};
+
+type HmacMd5 = Hmac<Md5>;
 
 /// Represents an active NTLM session holding its `sspi::Ntlm` state machine
 /// and its associated native credentials handle.
@@ -20,7 +25,13 @@ pub struct NtlmSession {
     pub ntlm: sspi::Ntlm,
     /// The specific credentials handle bound to this NTLM session.
     pub creds_handle: <sspi::Ntlm as sspi::SspiImpl>::CredentialsHandle,
+    /// The 8-byte server challenge generated during server leg 1.
+    pub server_challenge: Option<[u8; 8]>,
+    /// The expected credentials configured for this session.
+    pub expected_username: Option<String>,
+    pub expected_password: Option<String>,
 }
+
 
 /// NTLM Security Provider corresponding to MSN Chat's VTable at `0x372042D8`.
 /// Manages sessions for both client-side and server-side NTLM negotiations.
@@ -179,6 +190,9 @@ impl SecurityProvider for NtlmSecurityProvider {
                 sessions.insert(ctxt, NtlmSession {
                     ntlm,
                     creds_handle: acq_res.credentials_handle,
+                    server_challenge: None,
+                    expected_username: None,
+                    expected_password: None,
                 });
 
                 // Return mapped status
@@ -249,9 +263,16 @@ impl SecurityProvider for NtlmSecurityProvider {
                 // Server Step 1: Receive client negotiate message and produce server challenge
                 let mut ntlm = sspi::Ntlm::new();
 
+                // Setup server-side expected credentials for NTLM authentication
+                let identity = sspi::AuthIdentity {
+                    username: sspi::Username::new("user", None).unwrap(),
+                    password: "password".to_string().into(),
+                };
+
                 // Acquire server-side credentials handle
                 let mut acq_res = ntlm.acquire_credentials_handle()
                     .with_credential_use(sspi::CredentialUse::Inbound)
+                    .with_auth_data(&identity)
                     .execute(&mut ntlm)
                     .map_err(|_| SspiError::UnknownCredentials)?;
 
@@ -282,10 +303,23 @@ impl SecurityProvider for NtlmSecurityProvider {
                 *handle_id += 1;
                 *new_context = ctxt;
 
+                // Extract server challenge from output token (bytes 24..32 in Type 2 message)
+                let mut server_challenge = None;
+                if let Some(s_buf) = output_sspi.iter().find(|b| b.buffer_type.buffer_type == sspi::BufferType::Token) {
+                    if s_buf.buffer.len() >= 32 {
+                        let mut challenge = [0u8; 8];
+                        challenge.copy_from_slice(&s_buf.buffer[24..32]);
+                        server_challenge = Some(challenge);
+                    }
+                }
+
                 // Save active NTLM server session state
                 sessions.insert(ctxt, NtlmSession {
                     ntlm,
                     creds_handle: acq_res.credentials_handle,
+                    server_challenge,
+                    expected_username: Some("user".to_string()),
+                    expected_password: Some("password".to_string()),
                 });
 
                 // Return mapped status
@@ -318,6 +352,48 @@ impl SecurityProvider for NtlmSecurityProvider {
                         .map_err(|_| SspiError::InvalidToken)?
                 };
 
+                // Parse and verify client Type 3 credentials cryptographically
+                let token_buf = input_buffers
+                    .iter()
+                    .find(|b| b.buffer_type == SecBufferType::Token)
+                    .ok_or(SspiError::InvalidToken)?;
+                let type3_msg = &token_buf.bytes;
+
+                if type3_msg.len() < 64 || !type3_msg.starts_with(b"NTLMSSP\0") || type3_msg[8..12] != [3, 0, 0, 0] {
+                    return Err(SspiError::InvalidToken);
+                }
+
+                let nt_desc = parse_descriptor(type3_msg, 20)?;
+                let domain_desc = parse_descriptor(type3_msg, 28)?;
+                let user_desc = parse_descriptor(type3_msg, 36)?;
+
+                let domain = decode_utf16le(&type3_msg[domain_desc.offset .. domain_desc.offset + domain_desc.length]);
+                let username = decode_utf16le(&type3_msg[user_desc.offset .. user_desc.offset + user_desc.length]);
+                let nt_resp = &type3_msg[nt_desc.offset .. nt_desc.offset + nt_desc.length];
+
+                if nt_resp.len() < 16 {
+                    return Err(SspiError::InvalidToken);
+                }
+
+                let client_proof = &nt_resp[0..16];
+                let temp_blob = &nt_resp[16..];
+
+                let server_challenge = session.server_challenge.ok_or(SspiError::LogonDenied)?;
+                let expected_username = session.expected_username.as_deref().unwrap_or("user");
+                let expected_password = session.expected_password.as_deref().ok_or(SspiError::LogonDenied)?;
+
+                if username.to_lowercase() != expected_username.to_lowercase() {
+                    return Err(SspiError::LogonDenied);
+                }
+
+                let nt_hash = calculate_nt_hash(expected_password);
+                let ntlmv2_hash = calculate_ntlmv2_hash(&username, &domain, &nt_hash);
+                let expected_proof = calculate_ntlmv2_proof(&ntlmv2_hash, &server_challenge, temp_blob);
+
+                if client_proof != expected_proof {
+                    return Err(SspiError::LogonDenied);
+                }
+
                 // Copy output tokens
                 from_sspi_buffers(&output_sspi, output_buffers);
 
@@ -337,4 +413,83 @@ impl SecurityProvider for NtlmSecurityProvider {
         self.sessions.lock().unwrap().remove(context);
         Ok(())
     }
+}
+
+// --- Cryptographic Helper Functions for NetNTLMv2 Authentication Verification ---
+
+pub fn to_utf16le(s: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for c in s.encode_utf16() {
+        bytes.extend_from_slice(&c.to_le_bytes());
+    }
+    bytes
+}
+
+pub fn calculate_nt_hash(password: &str) -> [u8; 16] {
+    let mut hasher = Md4::new();
+    hasher.update(&to_utf16le(password));
+    let mut hash = [0u8; 16];
+    hash.copy_from_slice(&hasher.finalize());
+    hash
+}
+
+pub fn calculate_ntlmv2_hash(username: &str, domain: &str, nt_hash: &[u8; 16]) -> [u8; 16] {
+    let upper_user = username.to_uppercase();
+    let upper_domain = domain.to_uppercase();
+    let mut identity = to_utf16le(&upper_user);
+    identity.extend_from_slice(&to_utf16le(&upper_domain));
+
+    let mut mac = HmacMd5::new_from_slice(nt_hash).unwrap();
+    mac.update(&identity);
+    let mut hash = [0u8; 16];
+    hash.copy_from_slice(&mac.finalize().into_bytes());
+    hash
+}
+
+pub fn calculate_ntlmv2_proof(
+    ntlmv2_hash: &[u8; 16],
+    server_challenge: &[u8; 8],
+    temp_blob: &[u8],
+) -> [u8; 16] {
+    let mut mac = HmacMd5::new_from_slice(ntlmv2_hash).unwrap();
+    mac.update(server_challenge);
+    mac.update(temp_blob);
+    let mut proof = [0u8; 16];
+    proof.copy_from_slice(&mac.finalize().into_bytes());
+    proof
+}
+
+struct SecurityBufferDescriptor {
+    length: usize,
+    offset: usize,
+}
+
+fn parse_descriptor(msg: &[u8], offset: usize) -> Result<SecurityBufferDescriptor, SspiError> {
+    if offset + 8 > msg.len() {
+        return Err(SspiError::InvalidToken);
+    }
+    let length = u16::from_le_bytes([msg[offset], msg[offset + 1]]) as usize;
+    let msg_offset = u32::from_le_bytes([
+        msg[offset + 4],
+        msg[offset + 5],
+        msg[offset + 6],
+        msg[offset + 7],
+    ]) as usize;
+
+    if msg_offset + length > msg.len() {
+        return Err(SspiError::InvalidToken);
+    }
+
+    Ok(SecurityBufferDescriptor {
+        length,
+        offset: msg_offset,
+    })
+}
+
+fn decode_utf16le(bytes: &[u8]) -> String {
+    let u16s: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    String::from_utf16_lossy(&u16s)
 }
