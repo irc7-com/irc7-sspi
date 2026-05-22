@@ -667,7 +667,13 @@ pub unsafe extern "system" fn QueryContextAttributesA(
             0x5000 | 0x6000 => {
                 let sessions = providers.ntlm.sessions.lock().unwrap();
                 if let Some(s) = sessions.get(ctx) {
-                    s.authenticated_username.clone()
+                    match (&s.authenticated_domain, &s.authenticated_username) {
+                        (Some(domain), Some(user)) if !domain.is_empty() => {
+                            Some(format!("{}\\{}", domain, user))
+                        }
+                        (_, Some(user)) => Some(user.clone()),
+                        _ => Some("user".to_string()),
+                    }
                 } else {
                     Some("user".to_string())
                 }
@@ -731,7 +737,13 @@ pub unsafe extern "system" fn QueryContextAttributesW(
             0x5000 | 0x6000 => {
                 let sessions = providers.ntlm.sessions.lock().unwrap();
                 if let Some(s) = sessions.get(ctx) {
-                    s.authenticated_username.clone()
+                    match (&s.authenticated_domain, &s.authenticated_username) {
+                        (Some(domain), Some(user)) if !domain.is_empty() => {
+                            Some(format!("{}\\{}", domain, user))
+                        }
+                        (_, Some(user)) => Some(user.clone()),
+                        _ => Some("user".to_string()),
+                    }
                 } else {
                     Some("user".to_string())
                 }
