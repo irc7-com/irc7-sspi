@@ -106,10 +106,7 @@ pub unsafe fn write_back_c_buffers(desc: *mut SecBufferDesc, rust_buffers: &[cra
 /// Using static initialization ensures their internal contexts remain valid across multiple SSPI transitions.
 struct Providers {
     gatekeeper: crate::GateKeeperSecurityProvider,
-    gatekeeper_passport: crate::GateKeeperPassportSecurityProvider,
     ntlm: crate::NtlmSecurityProvider,
-    ntlm_passport: crate::NtlmPassportSecurityProvider,
-    passport: crate::PassportSecurityProvider,
 }
 
 /// Retrieves a static reference to the global providers registry.
@@ -117,23 +114,14 @@ fn get_providers() -> &'static Providers {
     static PROVIDERS: OnceLock<Providers> = OnceLock::new();
     PROVIDERS.get_or_init(|| {
         let gatekeeper = crate::GateKeeperSecurityProvider::new();
-        let gatekeeper_passport = crate::GateKeeperPassportSecurityProvider::new();
         let ntlm = crate::NtlmSecurityProvider::new();
-        let ntlm_passport = crate::NtlmPassportSecurityProvider::new();
-        let passport = crate::PassportSecurityProvider::new();
         
         let _ = gatekeeper.initialize();
-        let _ = gatekeeper_passport.initialize();
         let _ = ntlm.initialize();
-        let _ = ntlm_passport.initialize();
-        let _ = passport.initialize();
         
         Providers {
             gatekeeper,
-            gatekeeper_passport,
             ntlm,
-            ntlm_passport,
-            passport,
         }
     })
 }
@@ -143,10 +131,7 @@ fn get_provider_by_cred(handle: &crate::types::CredHandle) -> Option<&'static dy
     let p = get_providers();
     match handle.dw_upper {
         0x8888 => Some(&p.gatekeeper),
-        0xAAAA => Some(&p.gatekeeper_passport),
         0x6666 => Some(&p.ntlm),
-        0xBBBB => Some(&p.ntlm_passport),
-        0x7777 => Some(&p.passport),
         _ => None,
     }
 }
@@ -156,10 +141,7 @@ fn get_provider_by_ctxt(handle: &crate::types::CtxtHandle) -> Option<&'static dy
     let p = get_providers();
     match handle.dw_upper {
         0x1000 | 0x2000 => Some(&p.gatekeeper),
-        0x4000 | 0xA000 | 0xB000 => Some(&p.gatekeeper_passport),
         0x5000 | 0x6000 => Some(&p.ntlm),
-        0x7000 | 0x8000 => Some(&p.ntlm_passport),
-        0x3000 | 0x7777 => Some(&p.passport),
         _ => None,
     }
 }
@@ -170,10 +152,7 @@ fn get_provider_by_name(package: &str) -> Option<&'static dyn crate::types::Secu
     let name_lower = package.to_ascii_lowercase();
     match name_lower.as_str() {
         "gatekeeper" => Some(&p.gatekeeper),
-        "gatekeeperpassport" => Some(&p.gatekeeper_passport),
         "ntlm" => Some(&p.ntlm),
-        "ntlmpassport" => Some(&p.ntlm_passport),
-        "passport" => Some(&p.passport),
         _ => None,
     }
 }
@@ -685,88 +664,12 @@ pub unsafe extern "system" fn QueryContextAttributesA(
                     None
                 }
             }
-            0x4000 | 0xA000 | 0xB000 => {
-                let sessions = providers.gatekeeper_passport.sessions.lock().unwrap();
-                if let Some(comb) = sessions.get(ctx) {
-                    let mut gk_name = None;
-                    if let Some(gk_ctx) = comb.slot0_context {
-                        let gk_sessions = providers.gatekeeper_passport.sub_gk.sessions.lock().unwrap();
-                        if let Some(s) = gk_sessions.get(&gk_ctx) {
-                            gk_name = Some(format_gatekeeper_id(&s.gatekeeper_id));
-                        }
-                    }
-                    let mut passport_name = None;
-                    if let Some(pass_ctx) = comb.slot1_context {
-                        let pass_sessions = providers.gatekeeper_passport.sub_passport.sessions.lock().unwrap();
-                        if let Some(s) = pass_sessions.get(&pass_ctx) {
-                            if !s.client_info.is_empty() {
-                                passport_name = Some(s.client_info.clone());
-                            }
-                        }
-                    }
-                    if passport_name.is_none() && comb.slot1_context.is_some() {
-                        passport_name = Some("PassportUser".to_string());
-                    }
-                    match (gk_name, passport_name) {
-                        (Some(g), Some(p)) => Some(format!("{}+{}", g, p)),
-                        (Some(g), None) => Some(g),
-                        (None, Some(p)) => Some(p),
-                        _ => Some("GateKeeperPassportUser".to_string()),
-                    }
-                } else {
-                    None
-                }
-            }
-            0x3000 | 0x7777 => {
-                let sessions = providers.passport.sessions.lock().unwrap();
-                if let Some(s) = sessions.get(ctx) {
-                    if !s.client_info.is_empty() {
-                        Some(s.client_info.clone())
-                    } else {
-                        Some("PassportUser".to_string())
-                    }
-                } else {
-                    None
-                }
-            }
             0x5000 | 0x6000 => {
                 let sessions = providers.ntlm.sessions.lock().unwrap();
                 if let Some(s) = sessions.get(ctx) {
                     s.authenticated_username.clone()
                 } else {
                     Some("user".to_string())
-                }
-            }
-            0x7000 | 0x8000 => {
-                let sessions = providers.ntlm_passport.sessions.lock().unwrap();
-                if let Some(comb) = sessions.get(ctx) {
-                    let mut ntlm_name = None;
-                    if let Some(ntlm_ctx) = comb.slot0_context {
-                        let ntlm_sessions = providers.ntlm_passport.sub_ntlm.sessions.lock().unwrap();
-                        if let Some(s) = ntlm_sessions.get(&ntlm_ctx) {
-                            ntlm_name = s.authenticated_username.clone();
-                        }
-                    }
-                    let mut passport_name = None;
-                    if let Some(pass_ctx) = comb.slot1_context {
-                        let pass_sessions = providers.ntlm_passport.sub_passport.sessions.lock().unwrap();
-                        if let Some(s) = pass_sessions.get(&pass_ctx) {
-                            if !s.client_info.is_empty() {
-                                passport_name = Some(s.client_info.clone());
-                            }
-                        }
-                    }
-                    if passport_name.is_none() && comb.slot1_context.is_some() {
-                        passport_name = Some("PassportUser".to_string());
-                    }
-                    match (ntlm_name, passport_name) {
-                        (Some(n), Some(p)) => Some(format!("{}+{}", n, p)),
-                        (Some(n), None) => Some(n),
-                        (None, Some(p)) => Some(p),
-                        _ => Some("user+PassportUser".to_string()),
-                    }
-                } else {
-                    Some("user+PassportUser".to_string())
                 }
             }
             _ => None,
@@ -825,88 +728,12 @@ pub unsafe extern "system" fn QueryContextAttributesW(
                     None
                 }
             }
-            0x4000 | 0xA000 | 0xB000 => {
-                let sessions = providers.gatekeeper_passport.sessions.lock().unwrap();
-                if let Some(comb) = sessions.get(ctx) {
-                    let mut gk_name = None;
-                    if let Some(gk_ctx) = comb.slot0_context {
-                        let gk_sessions = providers.gatekeeper_passport.sub_gk.sessions.lock().unwrap();
-                        if let Some(s) = gk_sessions.get(&gk_ctx) {
-                            gk_name = Some(format_gatekeeper_id(&s.gatekeeper_id));
-                        }
-                    }
-                    let mut passport_name = None;
-                    if let Some(pass_ctx) = comb.slot1_context {
-                        let pass_sessions = providers.gatekeeper_passport.sub_passport.sessions.lock().unwrap();
-                        if let Some(s) = pass_sessions.get(&pass_ctx) {
-                            if !s.client_info.is_empty() {
-                                passport_name = Some(s.client_info.clone());
-                            }
-                        }
-                    }
-                    if passport_name.is_none() && comb.slot1_context.is_some() {
-                        passport_name = Some("PassportUser".to_string());
-                    }
-                    match (gk_name, passport_name) {
-                        (Some(g), Some(p)) => Some(format!("{}+{}", g, p)),
-                        (Some(g), None) => Some(g),
-                        (None, Some(p)) => Some(p),
-                        _ => Some("GateKeeperPassportUser".to_string()),
-                    }
-                } else {
-                    None
-                }
-            }
-            0x3000 | 0x7777 => {
-                let sessions = providers.passport.sessions.lock().unwrap();
-                if let Some(s) = sessions.get(ctx) {
-                    if !s.client_info.is_empty() {
-                        Some(s.client_info.clone())
-                    } else {
-                        Some("PassportUser".to_string())
-                    }
-                } else {
-                    None
-                }
-            }
             0x5000 | 0x6000 => {
                 let sessions = providers.ntlm.sessions.lock().unwrap();
                 if let Some(s) = sessions.get(ctx) {
                     s.authenticated_username.clone()
                 } else {
                     Some("user".to_string())
-                }
-            }
-            0x7000 | 0x8000 => {
-                let sessions = providers.ntlm_passport.sessions.lock().unwrap();
-                if let Some(comb) = sessions.get(ctx) {
-                    let mut ntlm_name = None;
-                    if let Some(ntlm_ctx) = comb.slot0_context {
-                        let ntlm_sessions = providers.ntlm_passport.sub_ntlm.sessions.lock().unwrap();
-                        if let Some(s) = ntlm_sessions.get(&ntlm_ctx) {
-                            ntlm_name = s.authenticated_username.clone();
-                        }
-                    }
-                    let mut passport_name = None;
-                    if let Some(pass_ctx) = comb.slot1_context {
-                        let pass_sessions = providers.ntlm_passport.sub_passport.sessions.lock().unwrap();
-                        if let Some(s) = pass_sessions.get(&pass_ctx) {
-                            if !s.client_info.is_empty() {
-                                passport_name = Some(s.client_info.clone());
-                            }
-                        }
-                    }
-                    if passport_name.is_none() && comb.slot1_context.is_some() {
-                        passport_name = Some("PassportUser".to_string());
-                    }
-                    match (ntlm_name, passport_name) {
-                        (Some(n), Some(p)) => Some(format!("{}+{}", n, p)),
-                        (Some(n), None) => Some(n),
-                        (None, Some(p)) => Some(p),
-                        _ => Some("user+PassportUser".to_string()),
-                    }
-                } else {
-                    Some("user+PassportUser".to_string())
                 }
             }
             _ => None,

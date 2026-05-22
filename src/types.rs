@@ -129,11 +129,3 @@ pub trait SecurityProvider: Send + Sync {
     fn delete_security_context(&self, context: &CtxtHandle) -> Result<(), SspiError>;
 }
 
-/// Context containing two distinct sub-context handles corresponding to Slot 0 (GateKeeper/NTLM) and Slot 1 (Passport).
-#[derive(Default)]
-pub struct CombinedContext {
-    pub h_context: CtxtHandle,
-    pub state: usize, // 160: GK/NTLM Step 1, 161: GK/NTLM Step 2, 162: Passport Step 1, 163: Passport Step 2
-    pub slot0_context: Option<CtxtHandle>,
-    pub slot1_context: Option<CtxtHandle>,
-}

@@ -1,4 +1,4 @@
-//! TCP test server binary for GateKeeper and GateKeeperPassport authentication.
+//! TCP test server binary for GateKeeper and NTLM authentication.
 //! Listens on port 6667 and processes AUTH challenge-response handshakes.
 
 use std::net::{TcpListener, TcpStream};
@@ -7,21 +7,17 @@ use std::thread;
 use std::sync::Arc;
 
 use ircx_sspi::{
-    GateKeeperSecurityProvider, GateKeeperPassportSecurityProvider, NtlmSecurityProvider,
-    NtlmPassportSecurityProvider, SecurityProvider, CredHandle, CtxtHandle, SecBuffer,
+    GateKeeperSecurityProvider, NtlmSecurityProvider,
+    SecurityProvider, CredHandle, CtxtHandle, SecBuffer,
     SecBufferType, SspiError,
 };
 
 #[derive(Clone)]
 struct ServerAuth {
     gk_provider: Arc<GateKeeperSecurityProvider>,
-    gkp_provider: Arc<GateKeeperPassportSecurityProvider>,
     ntlm_provider: Arc<NtlmSecurityProvider>,
-    ntlm_passport_provider: Arc<NtlmPassportSecurityProvider>,
     gk_cred: CredHandle,
-    gkp_cred: CredHandle,
     ntlm_cred: CredHandle,
-    ntlm_passport_cred: CredHandle,
 }
 
 /// Helper to unescape specialized characters inside the IRC/MSN client-auth payload.
@@ -115,7 +111,7 @@ fn parse_auth_line(line: &[u8]) -> Option<(String, char, Vec<u8>)> {
     let space1 = rest.iter().position(|&x| x == b' ')?;
     let package_bytes = &rest[..space1];
     let package = String::from_utf8_lossy(package_bytes).into_owned();
-    if package != "GateKeeper" && package != "GateKeeperPassport" && package != "NTLM" && package != "NTLMPassport" {
+    if package != "GateKeeper" && package != "NTLM" {
         return None;
     }
     
@@ -242,35 +238,21 @@ fn main() {
     println!("IRCX SSPI Test Server listening on port 6667...");
 
     let gk_provider = Arc::new(GateKeeperSecurityProvider::new());
-    let gkp_provider = Arc::new(GateKeeperPassportSecurityProvider::new());
     let ntlm_provider = Arc::new(NtlmSecurityProvider::new());
-    let ntlm_passport_provider = Arc::new(NtlmPassportSecurityProvider::new());
     
     let mut gk_cred = CredHandle::default();
     gk_provider.acquire_credentials_handle(None, "GateKeeper", 2, None, &mut gk_cred)
         .expect("Failed to acquire GateKeeper credentials");
-        
-    let mut gkp_cred = CredHandle::default();
-    gkp_provider.acquire_credentials_handle(None, "GateKeeperPassport", 2, None, &mut gkp_cred)
-        .expect("Failed to acquire GateKeeperPassport credentials");
 
     let mut ntlm_cred = CredHandle::default();
     ntlm_provider.acquire_credentials_handle(None, "NTLM", 2, None, &mut ntlm_cred)
         .expect("Failed to acquire NTLM credentials");
 
-    let mut ntlm_passport_cred = CredHandle::default();
-    ntlm_passport_provider.acquire_credentials_handle(None, "NTLMPassport", 2, None, &mut ntlm_passport_cred)
-        .expect("Failed to acquire NTLMPassport credentials");
-
     let auth = ServerAuth {
         gk_provider,
-        gkp_provider,
         ntlm_provider,
-        ntlm_passport_provider,
         gk_cred,
-        gkp_cred,
         ntlm_cred,
-        ntlm_passport_cred,
     };
 
     let last_listener = listeners.pop().unwrap();
@@ -417,7 +399,7 @@ fn process_auth(
         let mut new_context = CtxtHandle::default();
         let mut context_attr = 0;
         
-        let input_buffers = if package == "GateKeeper" || package == "GateKeeperPassport" {
+        let input_buffers = if package == "GateKeeper" {
             vec![
                 SecBuffer {
                     buffer_type: SecBufferType::Token,
@@ -461,33 +443,9 @@ fn process_auth(
                     &mut context_attr,
                 )
             }
-            "GateKeeperPassport" => {
-                auth.gkp_provider.accept_security_context(
-                    &auth.gkp_cred,
-                    None,
-                    &input_buffers,
-                    0,
-                    16,
-                    &mut new_context,
-                    &mut output_buffers,
-                    &mut context_attr,
-                )
-            }
             "NTLM" => {
                 auth.ntlm_provider.accept_security_context(
                     &auth.ntlm_cred,
-                    None,
-                    &input_buffers,
-                    0,
-                    16,
-                    &mut new_context,
-                    &mut output_buffers,
-                    &mut context_attr,
-                )
-            }
-            "NTLMPassport" => {
-                auth.ntlm_passport_provider.accept_security_context(
-                    &auth.ntlm_passport_cred,
                     None,
                     &input_buffers,
                     0,
@@ -509,9 +467,7 @@ fn process_auth(
                 let username = get_username(package, &new_context, auth);
                 let _ = match package {
                     "GateKeeper" => auth.gk_provider.delete_security_context(&new_context),
-                    "GateKeeperPassport" => auth.gkp_provider.delete_security_context(&new_context),
                     "NTLM" => auth.ntlm_provider.delete_security_context(&new_context),
-                    "NTLMPassport" => auth.ntlm_passport_provider.delete_security_context(&new_context),
                     _ => Ok(()),
                 };
                 *active_package = None;
@@ -557,33 +513,9 @@ fn process_auth(
                     &mut context_attr,
                 )
             }
-            "GateKeeperPassport" => {
-                auth.gkp_provider.accept_security_context(
-                    &auth.gkp_cred,
-                    Some(&ctx),
-                    &input_buffers,
-                    0,
-                    16,
-                    &mut new_context,
-                    &mut output_buffers,
-                    &mut context_attr,
-                )
-            }
             "NTLM" => {
                 auth.ntlm_provider.accept_security_context(
                     &auth.ntlm_cred,
-                    Some(&ctx),
-                    &input_buffers,
-                    0,
-                    16,
-                    &mut new_context,
-                    &mut output_buffers,
-                    &mut context_attr,
-                )
-            }
-            "NTLMPassport" => {
-                auth.ntlm_passport_provider.accept_security_context(
-                    &auth.ntlm_passport_cred,
                     Some(&ctx),
                     &input_buffers,
                     0,
@@ -605,9 +537,7 @@ fn process_auth(
                 let username = get_username(package, &new_context, auth);
                 let _ = match package {
                     "GateKeeper" => auth.gk_provider.delete_security_context(&new_context),
-                    "GateKeeperPassport" => auth.gkp_provider.delete_security_context(&new_context),
                     "NTLM" => auth.ntlm_provider.delete_security_context(&new_context),
-                    "NTLMPassport" => auth.ntlm_passport_provider.delete_security_context(&new_context),
                     _ => Ok(()),
                 };
                 *active_context = None;
@@ -637,9 +567,7 @@ fn cleanup_session(
         if let Some(pkg) = active_package.as_ref() {
             let _ = match pkg.as_str() {
                 "GateKeeper" => auth.gk_provider.delete_security_context(&ctx),
-                "GateKeeperPassport" => auth.gkp_provider.delete_security_context(&ctx),
                 "NTLM" => auth.ntlm_provider.delete_security_context(&ctx),
-                "NTLMPassport" => auth.ntlm_passport_provider.delete_security_context(&ctx),
                 _ => Ok(()),
             };
         }
@@ -659,37 +587,6 @@ fn get_username(
         } else {
             "GateKeeperUser".to_string()
         }
-    } else if package == "GateKeeperPassport" {
-        let sessions = auth.gkp_provider.sessions.lock().unwrap();
-        if let Some(comb) = sessions.get(context) {
-            let mut gk_name = None;
-            if let Some(gk_ctx) = comb.slot0_context {
-                let gk_sessions = auth.gkp_provider.sub_gk.sessions.lock().unwrap();
-                if let Some(s) = gk_sessions.get(&gk_ctx) {
-                    gk_name = Some(ircx_sspi::dll::format_gatekeeper_id(&s.gatekeeper_id));
-                }
-            }
-            let mut passport_name = None;
-            if let Some(pass_ctx) = comb.slot1_context {
-                let pass_sessions = auth.gkp_provider.sub_passport.sessions.lock().unwrap();
-                if let Some(s) = pass_sessions.get(&pass_ctx) {
-                    if !s.client_info.is_empty() {
-                        passport_name = Some(s.client_info.clone());
-                    }
-                }
-            }
-            if passport_name.is_none() && comb.slot1_context.is_some() {
-                passport_name = Some("PassportUser".to_string());
-            }
-            match (gk_name, passport_name) {
-                (Some(g), Some(p)) => format!("{}+{}", g, p),
-                (Some(g), None) => g,
-                (None, Some(p)) => p,
-                _ => "GateKeeperPassportUser".to_string(),
-            }
-        } else {
-            "GateKeeperPassportUser".to_string()
-        }
     } else if package == "NTLM" {
         let sessions = auth.ntlm_provider.sessions.lock().unwrap();
         if let Some(s) = sessions.get(context) {
@@ -702,51 +599,6 @@ fn get_username(
             return format!("{}@{}", uname, display_domain);
         } else {
             "NtlmUser".to_string()
-        }
-    } else if package == "NTLMPassport" {
-        let sessions = auth.ntlm_passport_provider.sessions.lock().unwrap();
-        if let Some(comb) = sessions.get(context) {
-            let mut ntlm_name = None;
-            let mut ntlm_domain = None;
-            if let Some(ntlm_ctx) = comb.slot0_context {
-                let ntlm_sessions = auth.ntlm_passport_provider.sub_ntlm.sessions.lock().unwrap();
-                if let Some(s) = ntlm_sessions.get(&ntlm_ctx) {
-                    ntlm_name = s.authenticated_username.clone();
-                    ntlm_domain = s.authenticated_domain.clone();
-                    if let (Some(level), Some(domain)) = (s.authenticated_level, &s.authenticated_domain) {
-                        println!("[AUTH] Verified NTLMPassport sub-NTLM user '{}' [Domain: '{}', Level: '{}']", s.authenticated_username.as_deref().unwrap_or(""), domain, level);
-                    }
-                }
-            }
-            if ntlm_name.is_none() {
-                ntlm_name = Some("NtlmUser".to_string());
-            }
-            
-            let mut passport_name = None;
-            if let Some(pass_ctx) = comb.slot1_context {
-                let pass_sessions = auth.ntlm_passport_provider.sub_passport.sessions.lock().unwrap();
-                if let Some(s) = pass_sessions.get(&pass_ctx) {
-                    if !s.client_info.is_empty() {
-                        passport_name = Some(s.client_info.clone());
-                    }
-                }
-            }
-            if passport_name.is_none() && comb.slot1_context.is_some() {
-                passport_name = Some("PassportUser".to_string());
-            }
-            let display_domain = match &ntlm_domain {
-                Some(d) if !d.is_empty() => d.clone(),
-                _ => "localhost".to_string(),
-            };
-            let ntlm_part = match (ntlm_name, passport_name) {
-                (Some(n), Some(p)) => format!("{}+{}", n, p),
-                (Some(n), None) => n,
-                (None, Some(p)) => p,
-                _ => "NtlmUser+PassportUser".to_string(),
-            };
-            return format!("{}@{}", ntlm_part, display_domain);
-        } else {
-            "NtlmUser+PassportUser".to_string()
         }
     } else {
         "UnknownUser".to_string()

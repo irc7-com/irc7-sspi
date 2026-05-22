@@ -171,8 +171,7 @@ internal static class IrcxAuthServer
 
 	private static unsafe AuthOutcome ProcessAuth(string package, char stage, byte[] payload, Session session)
 	{
-		if (!string.Equals(package, "GateKeeper", StringComparison.Ordinal) &&
-			!string.Equals(package, "GateKeeperPassport", StringComparison.Ordinal))
+		if (!string.Equals(package, "GateKeeper", StringComparison.Ordinal))
 			throw new InvalidOperationException("Unsupported package");
 
 		var unescaped = SspiHelpers.Unescape(payload);

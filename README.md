@@ -1,6 +1,6 @@
 # MSN Chat SSPI Security Providers
 
-A high-fidelity, cross-platform implementation of standard Security Support Provider Interface (SSPI) authentication protocols. This suite replicates and extends the legacy security providers originally utilized by the MSN Chat ActiveX controls, including **GateKeeper (GKSSP)**, **Passport**, **NTLM**, and the joint dual-state combined packages **GateKeeperPassport** and **NTLMPassport**.
+A high-fidelity, cross-platform implementation of standard Security Support Provider Interface (SSPI) authentication protocols. This suite replicates the legacy security providers originally utilized by the MSN Chat ActiveX controls, including **GateKeeper (GKSSP)** and **NTLM**.
 
 This repository is designed with a dual-target architecture:
 1. **Rust Library (`rlib`)**: Safe, modern Rust API with clean traits and explicit state-machine transitions.
@@ -11,8 +11,6 @@ This repository is designed with a dual-target architecture:
 ## Features
 
 - **GateKeeper (GKSSP) v1, v2, & v3**: Authentic replication of the proprietary MSN Chat challenge-response mechanism. Supports version negotiation, hostname-based HMAC-MD5 input profiles, and legacy 32-byte vs. 48-byte token responses.
-- **Passport Ticket Chunking**: Automatic segmenting, transmission, and re-assembly of large (up to 4KB+) Passport authentication tickets over length-constrained networks.
-- **Combined Providers (GateKeeperPassport & NTLMPassport)**: Multi-slot orchestrators that chain Slot 0 (GateKeeper/NTLM) and Slot 1 (Passport) to perform high-security dual-stage handshakes.
 - **NTLM Simulation**: Clean wrapping of standard NTLMSSP negotiate-challenge-response sequences.
 - **Dynamic Context Queries**: Fully supports standard `QueryContextAttributes` queries for `SECPKG_ATTR_NAMES` (identity verification) and process-safe layout-prefixed `FreeContextBuffer` deallocation.
 
