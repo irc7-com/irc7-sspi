@@ -11,8 +11,8 @@
 
 #![allow(non_snake_case)]
 
-use std::sync::OnceLock;
 use crate::types::SecurityProvider;
+use std::sync::OnceLock;
 
 /// Represents the standard `SecBuffer` struct layout in Windows (`sspi.h`).
 #[repr(C)]
@@ -61,7 +61,9 @@ pub unsafe fn parse_c_buffers(desc: *const SecBufferDesc) -> Vec<crate::types::S
             Vec::new()
         } else {
             // SAFETY: The caller guarantees that `pv_buffer` points to valid memory of size `cb_buffer`.
-            unsafe { std::slice::from_raw_parts(c_buf.pv_buffer, c_buf.cb_buffer as usize).to_vec() }
+            unsafe {
+                std::slice::from_raw_parts(c_buf.pv_buffer, c_buf.cb_buffer as usize).to_vec()
+            }
         };
         buffers.push(crate::types::SecBuffer {
             buffer_type: crate::types::SecBufferType::from(c_buf.buffer_type),
@@ -76,7 +78,10 @@ pub unsafe fn parse_c_buffers(desc: *const SecBufferDesc) -> Vec<crate::types::S
 ///
 /// # Safety
 /// The caller must ensure `desc` is a valid pointer to an output descriptor and holds sufficient memory capacity.
-pub unsafe fn write_back_c_buffers(desc: *mut SecBufferDesc, rust_buffers: &[crate::types::SecBuffer]) {
+pub unsafe fn write_back_c_buffers(
+    desc: *mut SecBufferDesc,
+    rust_buffers: &[crate::types::SecBuffer],
+) {
     if desc.is_null() {
         return;
     }
@@ -115,19 +120,18 @@ fn get_providers() -> &'static Providers {
     PROVIDERS.get_or_init(|| {
         let gatekeeper = crate::GateKeeperSecurityProvider::new();
         let ntlm = crate::NtlmSecurityProvider::new();
-        
+
         let _ = gatekeeper.initialize();
         let _ = ntlm.initialize();
-        
-        Providers {
-            gatekeeper,
-            ntlm,
-        }
+
+        Providers { gatekeeper, ntlm }
     })
 }
 
 /// Helper routing an incoming `CredHandle` to the matching global security provider based on `dw_upper`.
-fn get_provider_by_cred(handle: &crate::types::CredHandle) -> Option<&'static dyn crate::types::SecurityProvider> {
+fn get_provider_by_cred(
+    handle: &crate::types::CredHandle,
+) -> Option<&'static dyn crate::types::SecurityProvider> {
     let p = get_providers();
     match handle.dw_upper {
         0x8888 => Some(&p.gatekeeper),
@@ -137,7 +141,9 @@ fn get_provider_by_cred(handle: &crate::types::CredHandle) -> Option<&'static dy
 }
 
 /// Helper routing an incoming `CtxtHandle` to the matching global security provider based on `dw_upper`.
-fn get_provider_by_ctxt(handle: &crate::types::CtxtHandle) -> Option<&'static dyn crate::types::SecurityProvider> {
+fn get_provider_by_ctxt(
+    handle: &crate::types::CtxtHandle,
+) -> Option<&'static dyn crate::types::SecurityProvider> {
     let p = get_providers();
     match handle.dw_upper {
         0x1000 | 0x2000 => Some(&p.gatekeeper),
@@ -189,16 +195,13 @@ pub unsafe extern "system" fn AcquireCredentialsHandleA(
         Some(p) => p,
         None => return crate::types::SspiError::NotSupported.to_raw(),
     };
-    
+
     // Convert auth data pointer if supplied
-    let auth_data = if pAuthData.is_null() {
-        None
-    } else {
-        None
-    };
+    let auth_data = if pAuthData.is_null() { None } else { None };
 
     let mut cred = crate::types::CredHandle::default();
-    match provider.acquire_credentials_handle(None, pkg_name, fCredentialUse, auth_data, &mut cred) {
+    match provider.acquire_credentials_handle(None, pkg_name, fCredentialUse, auth_data, &mut cred)
+    {
         Ok(_) => {
             // SAFETY: We verified `phCredential` is not null and is writable.
             unsafe {
@@ -302,9 +305,13 @@ pub unsafe extern "system" fn InitializeSecurityContextA(
     if phCredential.is_null() || phNewContext.is_null() || pfContextAttr.is_null() {
         return crate::types::SspiError::InvalidHandle.to_raw();
     }
-    
+
     // SAFETY: Checked and resolved properly under safe block wrappers.
-    let context_ref = if phContext.is_null() { None } else { Some(unsafe { &*phContext }) };
+    let context_ref = if phContext.is_null() {
+        None
+    } else {
+        Some(unsafe { &*phContext })
+    };
     let provider = if let Some(ctx) = context_ref {
         match get_provider_by_ctxt(ctx) {
             Some(p) => p,
@@ -322,7 +329,9 @@ pub unsafe extern "system" fn InitializeSecurityContextA(
         None
     } else {
         // SAFETY: The target name string is null-terminated.
-        unsafe { std::ffi::CStr::from_ptr(pszTargetName) }.to_str().ok()
+        unsafe { std::ffi::CStr::from_ptr(pszTargetName) }
+            .to_str()
+            .ok()
     };
 
     // SAFETY: Pointers are validated.
@@ -383,9 +392,13 @@ pub unsafe extern "system" fn InitializeSecurityContextW(
     if phCredential.is_null() || phNewContext.is_null() || pfContextAttr.is_null() {
         return crate::types::SspiError::InvalidHandle.to_raw();
     }
-    
+
     // SAFETY: Checked pointer parameters.
-    let context_ref = if phContext.is_null() { None } else { Some(unsafe { &*phContext }) };
+    let context_ref = if phContext.is_null() {
+        None
+    } else {
+        Some(unsafe { &*phContext })
+    };
     let provider = if let Some(ctx) = context_ref {
         match get_provider_by_ctxt(ctx) {
             Some(p) => p,
@@ -471,9 +484,13 @@ pub unsafe extern "system" fn AcceptSecurityContext(
     if phCredential.is_null() || phNewContext.is_null() || pfContextAttr.is_null() {
         return crate::types::SspiError::InvalidHandle.to_raw();
     }
-    
+
     // SAFETY: Validated handle pointer boundaries.
-    let context_ref = if phContext.is_null() { None } else { Some(unsafe { &*phContext }) };
+    let context_ref = if phContext.is_null() {
+        None
+    } else {
+        Some(unsafe { &*phContext })
+    };
     let provider = if let Some(ctx) = context_ref {
         match get_provider_by_ctxt(ctx) {
             Some(p) => p,
@@ -608,9 +625,7 @@ pub unsafe fn free_sspi_buffer(ptr: *mut std::ffi::c_void) {
 /// # Safety
 /// Deallocates layout-prefixed buffers safely.
 #[unsafe(no_mangle)]
-pub unsafe extern "system" fn FreeContextBuffer(
-    pv: *mut std::ffi::c_void,
-) -> i32 {
+pub unsafe extern "system" fn FreeContextBuffer(pv: *mut std::ffi::c_void) -> i32 {
     if pv.is_null() {
         return crate::types::SspiError::Ok.to_raw();
     }
@@ -628,11 +643,22 @@ pub unsafe extern "system" fn FreeContextBuffer(
 pub fn format_gatekeeper_id(bytes: &[u8; 16]) -> String {
     format!(
         "{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
-        bytes[3], bytes[2], bytes[1], bytes[0],
-        bytes[5], bytes[4],
-        bytes[7], bytes[6],
-        bytes[8], bytes[9], bytes[10], bytes[11],
-        bytes[12], bytes[13], bytes[14], bytes[15]
+        bytes[3],
+        bytes[2],
+        bytes[1],
+        bytes[0],
+        bytes[5],
+        bytes[4],
+        bytes[7],
+        bytes[6],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
     )
 }
 
@@ -649,10 +675,10 @@ pub unsafe extern "system" fn QueryContextAttributesA(
     if phContext.is_null() || pBuffer.is_null() {
         return crate::types::SspiError::InvalidHandle.to_raw();
     }
-    
+
     // SAFETY: Checked pointer not null.
     let ctx = unsafe { &*phContext };
-    
+
     if ulAttribute == SECPKG_ATTR_NAMES {
         let providers = get_providers();
         let username = match ctx.dw_upper {
@@ -693,7 +719,7 @@ pub unsafe extern "system" fn QueryContextAttributesA(
             unsafe {
                 std::ptr::copy_nonoverlapping(name_bytes.as_ptr(), ptr, name_bytes.len());
                 *ptr.add(name_bytes.len()) = 0;
-                
+
                 let names_struct = pBuffer as *mut SecPkgContext_NamesA;
                 (*names_struct).sUserName = ptr as *mut i8;
             }
@@ -702,7 +728,7 @@ pub unsafe extern "system" fn QueryContextAttributesA(
             return crate::types::SspiError::InvalidHandle.to_raw();
         }
     }
-    
+
     crate::types::SspiError::NotSupported.to_raw()
 }
 
@@ -719,10 +745,10 @@ pub unsafe extern "system" fn QueryContextAttributesW(
     if phContext.is_null() || pBuffer.is_null() {
         return crate::types::SspiError::InvalidHandle.to_raw();
     }
-    
+
     // SAFETY: Checked pointer not null.
     let ctx = unsafe { &*phContext };
-    
+
     if ulAttribute == SECPKG_ATTR_NAMES {
         let providers = get_providers();
         let username = match ctx.dw_upper {
@@ -762,7 +788,7 @@ pub unsafe extern "system" fn QueryContextAttributesW(
             // SAFETY: Copy wide string content.
             unsafe {
                 std::ptr::copy_nonoverlapping(wide_chars.as_ptr() as *const u8, ptr, len_bytes);
-                
+
                 let names_struct = pBuffer as *mut SecPkgContext_NamesW;
                 (*names_struct).sUserName = ptr as *mut u16;
             }
@@ -771,8 +797,200 @@ pub unsafe extern "system" fn QueryContextAttributesW(
             return crate::types::SspiError::InvalidHandle.to_raw();
         }
     }
-    
+
     crate::types::SspiError::NotSupported.to_raw()
+}
+
+/// Represents standard `SecPkgInfoA` struct layout in Windows (`sspi.h`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SecPkgInfoA {
+    pub f_capabilities: u32,
+    pub w_version: u16,
+    pub w_rpcid: u16,
+    pub cb_max_token: u32,
+    pub name: *mut i8,
+    pub comment: *mut i8,
+}
+
+/// Represents standard `SecPkgInfoW` struct layout in Windows (`sspi.h`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SecPkgInfoW {
+    pub f_capabilities: u32,
+    pub w_version: u16,
+    pub w_rpcid: u16,
+    pub cb_max_token: u32,
+    pub name: *mut u16,
+    pub comment: *mut u16,
+}
+
+/// Lists all supported security packages in ANSI format.
+///
+/// # Safety
+/// pcPackages and ppPackageInfo must be valid writable pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn EnumerateSecurityPackagesA(
+    pcPackages: *mut u32,
+    ppPackageInfo: *mut *mut SecPkgInfoA,
+) -> i32 {
+    if pcPackages.is_null() || ppPackageInfo.is_null() {
+        return crate::types::SspiError::InvalidHandle.to_raw();
+    }
+
+    let pkgs = [
+        (
+            "GateKeeper",
+            "GateKeeper Security Package",
+            0x34u32,
+            1u16,
+            0xFFFFu16,
+            0x40u32,
+        ),
+        (
+            "NTLM",
+            "Microsoft NTLM Security Provider",
+            0x14u32,
+            1u16,
+            10u16,
+            2888u32,
+        ),
+    ];
+
+    let count = pkgs.len();
+    let struct_size = count * std::mem::size_of::<SecPkgInfoA>();
+    let mut total_string_size = 0;
+    for &(name, comment, _, _, _, _) in &pkgs {
+        total_string_size += name.len() + 1;
+        total_string_size += comment.len() + 1;
+    }
+
+    let total_bytes = struct_size + total_string_size;
+    let ptr = unsafe { allocate_sspi_buffer(total_bytes) };
+    if ptr.is_null() {
+        return crate::types::SspiError::InvalidToken.to_raw();
+    }
+
+    let info_array = ptr as *mut SecPkgInfoA;
+    let mut string_offset = struct_size;
+
+    for (i, &(name, comment, caps, ver, rpcid, max_token)) in pkgs.iter().enumerate() {
+        let name_ptr = unsafe { ptr.add(string_offset) as *mut i8 };
+        unsafe {
+            std::ptr::copy_nonoverlapping(name.as_ptr(), name_ptr as *mut u8, name.len());
+            *name_ptr.add(name.len()) = 0;
+        }
+        string_offset += name.len() + 1;
+
+        let comment_ptr = unsafe { ptr.add(string_offset) as *mut i8 };
+        unsafe {
+            std::ptr::copy_nonoverlapping(comment.as_ptr(), comment_ptr as *mut u8, comment.len());
+            *comment_ptr.add(comment.len()) = 0;
+        }
+        string_offset += comment.len() + 1;
+
+        unsafe {
+            *info_array.add(i) = SecPkgInfoA {
+                f_capabilities: caps,
+                w_version: ver,
+                w_rpcid: rpcid,
+                cb_max_token: max_token,
+                name: name_ptr,
+                comment: comment_ptr,
+            };
+        }
+    }
+
+    unsafe {
+        *pcPackages = count as u32;
+        *ppPackageInfo = info_array;
+    }
+
+    crate::types::SspiError::Ok.to_raw()
+}
+
+/// Lists all supported security packages in Unicode format.
+///
+/// # Safety
+/// pcPackages and ppPackageInfo must be valid writable pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn EnumerateSecurityPackagesW(
+    pcPackages: *mut u32,
+    ppPackageInfo: *mut *mut SecPkgInfoW,
+) -> i32 {
+    if pcPackages.is_null() || ppPackageInfo.is_null() {
+        return crate::types::SspiError::InvalidHandle.to_raw();
+    }
+
+    let pkgs = [
+        (
+            "GateKeeper",
+            "GateKeeper Security Package",
+            0x34u32,
+            1u16,
+            0xFFFFu16,
+            0x40u32,
+        ),
+        (
+            "NTLM",
+            "Microsoft NTLM Security Provider",
+            0x14u32,
+            1u16,
+            10u16,
+            2888u32,
+        ),
+    ];
+
+    let count = pkgs.len();
+    let struct_size = count * std::mem::size_of::<SecPkgInfoW>();
+    let mut total_string_size = 0;
+    for &(name, comment, _, _, _, _) in &pkgs {
+        total_string_size += (name.chars().count() + 1) * 2;
+        total_string_size += (comment.chars().count() + 1) * 2;
+    }
+
+    let total_bytes = struct_size + total_string_size;
+    let ptr = unsafe { allocate_sspi_buffer(total_bytes) };
+    if ptr.is_null() {
+        return crate::types::SspiError::InvalidToken.to_raw();
+    }
+
+    let info_array = ptr as *mut SecPkgInfoW;
+    let mut string_offset = struct_size;
+
+    for (i, &(name, comment, caps, ver, rpcid, max_token)) in pkgs.iter().enumerate() {
+        let name_wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        let name_ptr = unsafe { ptr.add(string_offset) as *mut u16 };
+        unsafe {
+            std::ptr::copy_nonoverlapping(name_wide.as_ptr(), name_ptr, name_wide.len());
+        }
+        string_offset += name_wide.len() * 2;
+
+        let comment_wide: Vec<u16> = comment.encode_utf16().chain(std::iter::once(0)).collect();
+        let comment_ptr = unsafe { ptr.add(string_offset) as *mut u16 };
+        unsafe {
+            std::ptr::copy_nonoverlapping(comment_wide.as_ptr(), comment_ptr, comment_wide.len());
+        }
+        string_offset += comment_wide.len() * 2;
+
+        unsafe {
+            *info_array.add(i) = SecPkgInfoW {
+                f_capabilities: caps,
+                w_version: ver,
+                w_rpcid: rpcid,
+                cb_max_token: max_token,
+                name: name_ptr,
+                comment: comment_ptr,
+            };
+        }
+    }
+
+    unsafe {
+        *pcPackages = count as u32;
+        *ppPackageInfo = info_array;
+    }
+
+    crate::types::SspiError::Ok.to_raw()
 }
 
 // ============================================================================
@@ -850,7 +1068,7 @@ unsafe impl Sync for SecurityFunctionTableW {}
 // Global Static tables loaded during dynamic binding link
 static FUNCTION_TABLE_A: SecurityFunctionTableA = SecurityFunctionTableA {
     dw_version: 1,
-    enumerate_security_packages_a: UnsupportedStub as *const std::ffi::c_void,
+    enumerate_security_packages_a: EnumerateSecurityPackagesA as *const std::ffi::c_void,
     query_credentials_attributes_a: UnsupportedStub as *const std::ffi::c_void,
     acquire_credentials_handle_a: AcquireCredentialsHandleA as *const std::ffi::c_void,
     free_credentials_handle: FreeCredentialsHandle as *const std::ffi::c_void,
@@ -879,7 +1097,7 @@ static FUNCTION_TABLE_A: SecurityFunctionTableA = SecurityFunctionTableA {
 
 static FUNCTION_TABLE_W: SecurityFunctionTableW = SecurityFunctionTableW {
     dw_version: 1,
-    enumerate_security_packages_w: UnsupportedStub as *const std::ffi::c_void,
+    enumerate_security_packages_w: EnumerateSecurityPackagesW as *const std::ffi::c_void,
     query_credentials_attributes_w: UnsupportedStub as *const std::ffi::c_void,
     acquire_credentials_handle_w: AcquireCredentialsHandleW as *const std::ffi::c_void,
     free_credentials_handle: FreeCredentialsHandle as *const std::ffi::c_void,

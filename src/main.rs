@@ -67,6 +67,11 @@ type FreeContextBufferFn = unsafe extern "system" fn(
     pv: *mut std::ffi::c_void,
 ) -> i32;
 
+type EnumerateSecurityPackagesAFn = unsafe extern "system" fn(
+    pcPackages: *mut u32,
+    ppPackageInfo: *mut *mut ircx_sspi::dll::SecPkgInfoA,
+) -> i32;
+
 // ============================================================================
 // Platform-Specific Dynamic Loader Bindings
 // ============================================================================
@@ -382,6 +387,32 @@ impl SspiInterface {
             Err(SspiError::NotSupported)
         }
     }
+
+    unsafe fn enumerate_security_packages(&self) -> Result<Vec<(String, String, u32, u16, u16, u32)>, SspiError> {
+        let func: EnumerateSecurityPackagesAFn = unsafe { std::mem::transmute(self.table.enumerate_security_packages_a) };
+        let mut count = 0u32;
+        let mut pkg_info = std::ptr::null_mut();
+        let res = unsafe { func(&mut count, &mut pkg_info) };
+        match map_sspi_code(res) {
+            Ok(SspiError::Ok) => {
+                if pkg_info.is_null() || count == 0 {
+                    return Ok(Vec::new());
+                }
+                let mut pkgs = Vec::new();
+                for i in 0..count {
+                    let info = unsafe { &*pkg_info.add(i as usize) };
+                    let name = unsafe { std::ffi::CStr::from_ptr(info.name).to_string_lossy().into_owned() };
+                    let comment = unsafe { std::ffi::CStr::from_ptr(info.comment).to_string_lossy().into_owned() };
+                    pkgs.push((name, comment, info.f_capabilities, info.w_version, info.w_rpcid, info.cb_max_token));
+                }
+                let free_func: FreeContextBufferFn = unsafe { std::mem::transmute(self.table.free_context_buffer) };
+                unsafe { free_func(pkg_info as *mut std::ffi::c_void); }
+                Ok(pkgs)
+            }
+            Ok(e) => Err(e),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 impl Drop for SspiInterface {
@@ -550,6 +581,9 @@ fn main() {
     let sspi = SspiInterface::load();
     print_success("SSPI DLL dynamically loaded and InitSecurityInterfaceA resolved.");
 
+    // 0. Test Security Package Enumeration
+    test_enumerate_packages(&sspi);
+
     // 1. Test GateKeeper Security Provider Handshake
     test_gatekeeper_handshake(&sspi);
 
@@ -560,6 +594,19 @@ fn main() {
     test_ntlm_handshake(&sspi);
 
     print_header("ALL DLL SSPI AUTHENTICATION HANDSHAKES VERIFIED SUCCESSFULLY");
+}
+
+fn test_enumerate_packages(sspi: &SspiInterface) {
+    print_header("0. ENUMERATE SECURITY PACKAGES");
+    let pkgs = unsafe { sspi.enumerate_security_packages().unwrap() };
+    print_info(&format!("Enumerated {} packages:", pkgs.len()));
+    for (name, comment, caps, ver, rpcid, max_token) in &pkgs {
+        print_info(&format!("  Package: {}, Comment: {}, Caps: 0x{:X}, Ver: {}, RPCID: {}, MaxToken: {}", name, comment, caps, ver, rpcid, max_token));
+    }
+    assert_eq!(pkgs.len(), 2);
+    assert_eq!(pkgs[0].0, "GateKeeper");
+    assert_eq!(pkgs[1].0, "NTLM");
+    print_success("Security package enumeration verified successfully!");
 }
 
 /// Simulates standard GateKeeper client-server challenge-response.
