@@ -849,7 +849,7 @@ pub unsafe extern "system" fn EnumerateSecurityPackagesA(
         ),
         (
             "NTLM",
-            "Microsoft NTLM Security Provider",
+            "NTLM Security Package",
             0x14u32,
             1u16,
             10u16,
