@@ -18,6 +18,8 @@ fn main() -> eframe::Result<()> {
             .with_inner_size([920.0, 620.0])
             .with_min_inner_size([750.0, 500.0])
             .with_resizable(true),
+        follow_system_theme: true,
+        default_theme: eframe::Theme::Dark,
         ..Default::default()
     };
 
@@ -25,38 +27,35 @@ fn main() -> eframe::Result<()> {
         "IRCX NTLM Vault Manager",
         options,
         Box::new(|cc| {
-            setup_custom_theme(&cc.egui_ctx);
-            Box::new(VaultManagerApp::new())
+            let is_dark = cc.egui_ctx.style().visuals.dark_mode;
+            apply_theme_overrides(&cc.egui_ctx, is_dark);
+            let mut app = VaultManagerApp::new();
+            app.last_dark_mode = Some(is_dark);
+            Box::new(app)
         }),
     )
 }
 
-fn setup_custom_theme(ctx: &egui::Context) {
+fn apply_theme_overrides(ctx: &egui::Context, is_dark: bool) {
     let mut style = (*ctx.style()).clone();
-    
-    // Set custom premium dark palette
-    style.visuals.dark_mode = true;
-    style.visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(15, 18, 25);
-    style.visuals.widgets.noninteractive.weak_bg_fill = egui::Color32::from_rgb(22, 26, 37);
-    
-    style.visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(30, 36, 51);
-    style.visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(42, 51, 71);
-    style.visuals.widgets.active.bg_fill = egui::Color32::from_rgb(52, 63, 89);
-    
-    style.visuals.widgets.inactive.fg_stroke.color = egui::Color32::from_rgb(220, 228, 240);
-    style.visuals.widgets.hovered.fg_stroke.color = egui::Color32::WHITE;
-    style.visuals.widgets.active.fg_stroke.color = egui::Color32::WHITE;
-    
-    // Smooth rounding for a modern modern look
+
+    // Start from egui defaults for the current mode, then apply shared accents.
+    style.visuals = if is_dark {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    };
+
+    // Smooth rounding for a modern look.
     style.visuals.widgets.noninteractive.rounding = egui::Rounding::same(8.0);
     style.visuals.widgets.inactive.rounding = egui::Rounding::same(6.0);
     style.visuals.widgets.hovered.rounding = egui::Rounding::same(6.0);
     style.visuals.widgets.active.rounding = egui::Rounding::same(6.0);
-    
-    // Sleek bright blue accents for selections/focus
+
+    // Keep a single accent color across dark/light themes.
     style.visuals.selection.bg_fill = egui::Color32::from_rgb(46, 115, 230);
-    style.visuals.widgets.active.bg_fill = egui::Color32::from_rgb(46, 115, 230);
-    
+    style.visuals.widgets.active.bg_fill = style.visuals.selection.bg_fill;
+
     ctx.set_style(style);
 }
 
@@ -78,6 +77,7 @@ struct VaultManagerApp {
     
     // Confirmation State
     pending_delete: Option<String>,
+    last_dark_mode: Option<bool>,
 }
 
 impl VaultManagerApp {
@@ -94,6 +94,7 @@ impl VaultManagerApp {
             input_level: UserLevel::Guide,
             show_password: false,
             pending_delete: None,
+            last_dark_mode: None,
         };
         app.reload_vault();
         app
@@ -232,6 +233,12 @@ impl VaultManagerApp {
 
 impl eframe::App for VaultManagerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let is_dark = ctx.style().visuals.dark_mode;
+        if self.last_dark_mode != Some(is_dark) {
+            apply_theme_overrides(ctx, is_dark);
+            self.last_dark_mode = Some(is_dark);
+        }
+
         // Clear old status messages after 4 seconds
         if let Some(t) = self.status_time {
             if t.elapsed().as_secs() >= 4 {
@@ -264,20 +271,31 @@ impl eframe::App for VaultManagerApp {
 
         // --- STATUS & CONFIRMATION BANNERS ---
         if self.status_message.is_some() || self.pending_delete.is_some() {
-            egui::TopBottomPanel::top("status_banner_panel").frame(egui::Frame::none().fill(egui::Color32::from_rgb(25, 30, 43))).show(ctx, |ui| {
+            egui::TopBottomPanel::top("status_banner_panel")
+                .frame(egui::Frame::none().fill(ctx.style().visuals.panel_fill))
+                .show(ctx, |ui| {
                 ui.add_space(4.0);
                 
                 // Show standard notification banner
                 if let Some((ref msg, is_success)) = self.status_message {
-                    let banner_color = if is_success {
-                        egui::Color32::from_rgb(30, 100, 30) // Dark green
+                    let banner_color = if is_success && ui.visuals().dark_mode {
+                        egui::Color32::from_rgb(30, 100, 30)
+                    } else if is_success {
+                        egui::Color32::from_rgb(196, 240, 196)
+                    } else if ui.visuals().dark_mode {
+                        egui::Color32::from_rgb(100, 30, 30)
                     } else {
-                        egui::Color32::from_rgb(100, 30, 30) // Dark red
+                        egui::Color32::from_rgb(248, 210, 210)
+                    };
+                    let text_color = if ui.visuals().dark_mode {
+                        egui::Color32::WHITE
+                    } else {
+                        egui::Color32::BLACK
                     };
                     
-                    ui.add(egui::Button::new(egui::RichText::new(msg))
+                    ui.add(egui::Button::new(egui::RichText::new(msg).color(text_color))
                         .fill(banner_color)
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::LIGHT_GRAY))
+                        .stroke(egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
                     );
                 }
 
@@ -287,7 +305,11 @@ impl eframe::App for VaultManagerApp {
                 if let Some(ref username) = self.pending_delete {
                     ui.horizontal(|ui| {
                         ui.colored_label(
-                            egui::Color32::from_rgb(220, 160, 50),
+                            if ui.visuals().dark_mode {
+                                egui::Color32::from_rgb(220, 160, 50)
+                            } else {
+                                egui::Color32::from_rgb(140, 95, 10)
+                            },
                             format!("⚠ Are you absolutely sure you want to delete user '{}'?", username)
                         );
                         if ui.button("🗑 Yes, Delete").clicked() {
@@ -324,7 +346,10 @@ impl eframe::App for VaultManagerApp {
 
                     if sorted_users.is_empty() {
                         ui.add_space(20.0);
-                        ui.colored_label(egui::Color32::GRAY, "No registered users in the database.\nUse the panel on the right to provision accounts.");
+                        ui.colored_label(
+                            ui.visuals().weak_text_color(),
+                            "No registered users in the database.\nUse the panel on the right to provision accounts.",
+                        );
                     } else {
                         egui::ScrollArea::vertical().max_height(480.0).show(ui, |ui| {
                             egui::Grid::new("users_grid")
@@ -344,7 +369,7 @@ impl eframe::App for VaultManagerApp {
                                         ui.label(&account.username);
                                         
                                         if account.domain.is_empty() {
-                                            ui.colored_label(egui::Color32::GRAY, "[no domain]");
+                                            ui.colored_label(ui.visuals().weak_text_color(), "[no domain]");
                                         } else {
                                             ui.label(&account.domain);
                                         }
@@ -405,7 +430,7 @@ impl eframe::App for VaultManagerApp {
                     ui.add_space(8.0);
 
                     egui::Frame::none()
-                        .fill(egui::Color32::from_rgb(20, 24, 33))
+                        .fill(ui.visuals().widgets.noninteractive.weak_bg_fill)
                         .rounding(8.0)
                         .inner_margin(12.0)
                         .show(ui, |ui| {
@@ -419,7 +444,7 @@ impl eframe::App for VaultManagerApp {
                                         .interactive(false)
                                     );
                                 });
-                                ui.colored_label(egui::Color32::GRAY, "Username is immutable post-creation.");
+                                ui.colored_label(ui.visuals().weak_text_color(), "Username is immutable post-creation.");
                             } else {
                                 ui.text_edit_singleline(&mut self.input_username);
                             }
@@ -442,14 +467,14 @@ impl eframe::App for VaultManagerApp {
                                 ui.checkbox(&mut self.show_password, "Show");
                             });
                             if is_edit {
-                                ui.colored_label(egui::Color32::GRAY, "Leave empty to keep existing password.");
+                                ui.colored_label(ui.visuals().weak_text_color(), "Leave empty to keep existing password.");
                             }
                             ui.add_space(6.0);
 
                             // Domain Input Field
                             ui.label("Domain");
                             ui.text_edit_singleline(&mut self.input_domain);
-                            ui.colored_label(egui::Color32::GRAY, "Empty, \".\", or \"workgroup\" mapped to no domain.");
+                            ui.colored_label(ui.visuals().weak_text_color(), "Empty, \".\", or \"workgroup\" mapped to no domain.");
                             ui.add_space(6.0);
 
                             // User Level Radio Buttons
