@@ -2322,7 +2322,6 @@ dependencies = [
  "hmac 0.12.1",
  "md-5 0.10.6",
  "md4",
- "rand 0.8.6",
  "serde",
  "serde_json",
  "sspi",
