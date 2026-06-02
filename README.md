@@ -28,6 +28,8 @@ cargo build
 cargo run --bin ircx-sspi-test
 ```
 
+On macOS, this repo includes `.cargo/config.toml` with a target-specific Rust flag that disables debug assertions (`-C debug-assertions=no`) for local dev builds. This avoids a known GUI startup panic in transitive `eframe`/`winit` Objective-C bindings when running `ircx-sspi-gui` in debug mode.
+
 On Windows, this compiles to `target/debug/ircx_sspi.dll`. On Linux or macOS, it compiles to standard shared objects (`libircx_sspi.so` / `libircx_sspi.dylib`).
 
 ---
