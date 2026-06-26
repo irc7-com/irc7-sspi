@@ -6,8 +6,6 @@ on:
       - main
     tags:
       - "v*"
-  pull_request:
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -42,6 +40,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: "Build Rust cdylib"
+        shell: bash
         run: bash scripts/ci/build-native.sh
 
       - name: "Stage native asset (Windows)"
