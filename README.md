@@ -18,19 +18,58 @@ This repository is designed with a dual-target architecture:
 
 ## Build Instructions
 
-Compile both the Rust static library and the native C/C++ dynamic library:
+Compile the Rust cdylib and the C# wrapper/sample:
 
 ```bash
-# Build both the Rust library (rlib) and standard SSPI DLL (cdylib)
-cargo build
+# Build the Rust cdylib used by the package
+cargo build --lib --release
 
-# Run the dynamic FFI dynamic integration test suite
+# Build the C# example / wrapper project
+dotnet build "examples/c#/ConsoleApp1/ConsoleApp1.csproj"
+
+# Run the dynamic FFI integration test suite
 cargo run --bin ircx-sspi-test
 ```
 
-On macOS, this repo includes `.cargo/config.toml` with a target-specific Rust flag that disables debug assertions (`-C debug-assertions=no`) for local dev builds. This avoids a known GUI startup panic in transitive `eframe`/`winit` Objective-C bindings when running `ircx-sspi-gui` in debug mode.
+On Windows, a release build produces `target/release/ircx_sspi.dll`. On Linux or macOS, it produces `target/release/libircx_sspi.so` / `target/release/libircx_sspi.dylib`.
 
-On Windows, this compiles to `target/debug/ircx_sspi.dll`. On Linux or macOS, it compiles to standard shared objects (`libircx_sspi.so` / `libircx_sspi.dylib`).
+---
+
+## NuGet Packaging
+
+The repository now supports a single cross-platform NuGet package:
+
+- **Package ID:** `IrcxSspi.Native`
+- **Managed wrapper:** `interop/IrcxSspi.Native/IrcxSspiNative.cs`
+- **Native runtime assets:**
+  - `runtimes/win-x64/native/ircx_sspi.dll`
+  - `runtimes/linux-x64/native/libircx_sspi.so`
+  - `runtimes/linux-arm64/native/libircx_sspi.so`
+  - `runtimes/osx-arm64/native/libircx_sspi.dylib`
+
+The package relies on normal .NET RID/native-asset resolution, so no manual loader or repo-root probing is required. The example app no longer calls `IrcxSspiModule.Initialize()`.
+
+### Consume from another .NET project
+
+```xml
+<ItemGroup>
+  <PackageReference Include="IrcxSspi.Native" Version="0.1.0" />
+</ItemGroup>
+```
+
+### GitHub Packages setup
+
+1. Open the repository settings.
+2. Go to **Actions -> General -> Workflow permissions** and enable **Read and write permissions**.
+3. Keep the publishing workflow restricted to version tags such as `v0.1.0`, `v0.1.1`, etc.
+4. Use the GitHub Packages NuGet feed for this repository owner:
+
+```text
+https://nuget.pkg.github.com/<OWNER>/index.json
+```
+
+5. For local development, authenticate with a personal access token that has `read:packages`.
+6. In GitHub Actions, the workflow can push packages with `GITHUB_TOKEN` as long as `packages: write` is granted.
 
 ---
 
@@ -182,3 +221,5 @@ if (queryStatus == SEC_E_OK) {
 Any pointers allocated by `QueryContextAttributesA` or `QueryContextAttributesW` (like `sUserName` inside the names structures) **must** be released using the matching `FreeContextBuffer` FFI function pointer resolved from the SSP `SecurityFunctionTable`. 
 
 Our FFI layer allocates these buffers with a custom layout-prefixed size tag. Freeing memory using standard system `free` or standard allocator calls outside this table will corrupt the memory heap.
+
+

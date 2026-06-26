@@ -187,7 +187,11 @@ pub unsafe extern "system" fn AcquireCredentialsHandleA(
         return crate::types::SspiError::UnknownCredentials.to_raw();
     }
     // SAFETY: We verified `pszPackage` is not null. The caller guarantees it points to a valid null-terminated string.
-    let pkg_name = match unsafe { std::ffi::CStr::from_ptr(pszPackage) }.to_str() {
+    let pkg_name = match unsafe {
+        std::ffi::CStr::from_ptr(pszPackage.cast::<std::ffi::c_char>())
+    }
+    .to_str()
+    {
         Ok(s) => s,
         Err(_) => return crate::types::SspiError::UnknownCredentials.to_raw(),
     };
@@ -329,7 +333,7 @@ pub unsafe extern "system" fn InitializeSecurityContextA(
         None
     } else {
         // SAFETY: The target name string is null-terminated.
-        unsafe { std::ffi::CStr::from_ptr(pszTargetName) }
+        unsafe { std::ffi::CStr::from_ptr(pszTargetName.cast::<std::ffi::c_char>()) }
             .to_str()
             .ok()
     };

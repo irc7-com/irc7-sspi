@@ -1,0 +1,127 @@
+name: build-and-publish-nuget
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-native:
+    name: Build native ${{ matrix.rid }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            rid: win-x64
+            binary: ircx_sspi.dll
+          - os: ubuntu-22.04
+            rid: linux-x64
+            binary: libircx_sspi.so
+          - os: ubuntu-24.04-arm
+            rid: linux-arm64
+            binary: libircx_sspi.so
+          - os: macos-14
+            rid: osx-arm64
+            binary: libircx_sspi.dylib
+
+    steps:
+      - name: "Checkout repository"
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - name: "Install Rust toolchain"
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: "Build Rust cdylib"
+        shell: bash
+        run: bash scripts/ci/build-native.sh
+
+      - name: "Stage native asset (Windows)"
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/ci/stage-native-windows.ps1 -RID "${{ matrix.rid }}" -Binary "${{ matrix.binary }}"
+
+      - name: "Stage native asset (Unix)"
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash scripts/ci/stage-native-unix.sh "${{ matrix.rid }}" "${{ matrix.binary }}"
+
+      - name: "Upload native asset"
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: native-${{ matrix.rid }}
+          path: staging
+          if-no-files-found: error
+
+  pack:
+    name: Pack NuGet
+    runs-on: ubuntu-22.04
+    needs: build-native
+    steps:
+      - name: "Checkout repository"
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - name: "Set up .NET"
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
+        with:
+          dotnet-version: 10.0.x
+
+      - name: "Download native assets"
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          path: artifacts/native
+          merge-multiple: true
+
+      - name: "Read package version"
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(python3 scripts/ci/read-version.py)
+          echo "PACKAGE_VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: "Pack NuGet package"
+        shell: bash
+        run: |
+          export NATIVE_ASSETS_DIR="${{ github.workspace }}/artifacts/native"
+          bash scripts/ci/pack-nuget.sh
+
+      - name: "Upload NuGet package"
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: nuget-package
+          path: artifacts/nuget/*.nupkg
+          if-no-files-found: error
+
+  publish:
+    name: Publish to GitHub Packages
+    runs-on: ubuntu-22.04
+    needs: pack
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: "Checkout repository"
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - name: "Download NuGet package"
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: nuget-package
+          path: artifacts/nuget
+
+      - name: "Set up .NET"
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
+        with:
+          dotnet-version: 10.0.x
+
+      - name: "Push package"
+        shell: bash
+        run: |
+          export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          export GITHUB_REPOSITORY_OWNER="${{ github.repository_owner }}"
+          bash scripts/ci/publish-nuget.sh

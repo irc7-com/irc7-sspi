@@ -1,16 +1,26 @@
-# Rust
-/target
+# Rust / Cargo
+/target/
 
-# C# / .NET / Visual Studio
-/examples/**/[Bb]in/
-/examples/**/[Ob]j/
-/examples/**/.vs/
-/examples/**/*.user
-/examples/**/*.userosscache
-/examples/**/*.sln.docstates
-/examples/**/*.suo
-/examples/**/*.suo.tmp
-/examples/**/*.userprefs
+# .NET / Visual Studio build outputs (anywhere)
+**/[Bb]in/
+**/[Oo]bj/
+.vs/
+
+# Visual Studio user files
+**/*.user
+**/*.userosscache
+**/*.sln.docstates
+**/*.suo
+**/*.suo.tmp
+**/*.userprefs
+
+# JetBrains
+.idea/
+*.iml
+
+# CI / packaging outputs
+/artifacts/
+/staging/
 
 # Vault / Crypto
 master.key

@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -20,7 +21,7 @@ internal static class IrcxAuthServer
 		public static AuthOutcome Success(string userName) => new(AuthOutcomeKind.Success, null, userName);
 	}
 
-	private sealed unsafe class Session : IDisposable
+	private sealed class Session : IDisposable
 	{
 		public string? ActivePackage;
 		public IrcxSspiNative.CtxtHandle Context;
@@ -42,14 +43,14 @@ internal static class IrcxAuthServer
 			if (HasContext)
 			{
 				var ctx = Context;
-				unsafe { _ = IrcxSspiNative.DeleteSecurityContext(&ctx); }
+				_ = IrcxSspiNative.DeleteSecurityContext(ref ctx);
 				HasContext = false;
 				Context = default;
 			}
 			if (HasCred)
 			{
 				var cred = Cred;
-				unsafe { _ = IrcxSspiNative.FreeCredentialsHandle(&cred); }
+				_ = IrcxSspiNative.FreeCredentialsHandle(ref cred);
 				HasCred = false;
 				Cred = default;
 			}
@@ -169,7 +170,7 @@ internal static class IrcxAuthServer
 		}
 	}
 
-	private static unsafe AuthOutcome ProcessAuth(string package, char stage, byte[] payload, Session session)
+	private static AuthOutcome ProcessAuth(string package, char stage, byte[] payload, Session session)
 	{
 		if (!string.Equals(package, "GateKeeper", StringComparison.Ordinal))
 			throw new InvalidOperationException("Unsupported package");
@@ -199,7 +200,7 @@ internal static class IrcxAuthServer
 			{
 				var ctx = newCtx;
 				var username = SspiHelpers.QueryContextUserName(ref ctx) ?? "Unknown";
-				_ = IrcxSspiNative.DeleteSecurityContext(&ctx);
+				_ = IrcxSspiNative.DeleteSecurityContext(ref ctx);
 				session.Dispose();
 				session.Reset();
 				return AuthOutcome.Success(username + "@" + package);
@@ -217,7 +218,7 @@ internal static class IrcxAuthServer
 				throw new InvalidOperationException("Missing credentials handle");
 
 			var ctx = session.Context;
-			var (rc, newCtx, outToken) = Accept(session.Cred, context: &ctx, unescaped, includePkgParams: false);
+			var (rc, newCtx, outToken) = Accept(session.Cred, context: ctx, unescaped, includePkgParams: false);
 			if (rc == (int)IrcxSspiNative.SspiError.ContinueNeeded)
 			{
 				session.Context = newCtx;
@@ -228,7 +229,7 @@ internal static class IrcxAuthServer
 			{
 				var finalCtx = newCtx;
 				var username = SspiHelpers.QueryContextUserName(ref finalCtx) ?? "Unknown";
-				_ = IrcxSspiNative.DeleteSecurityContext(&finalCtx);
+				_ = IrcxSspiNative.DeleteSecurityContext(ref finalCtx);
 				session.Dispose();
 				session.Reset();
 				return AuthOutcome.Success(username + "@" + package);
@@ -237,7 +238,7 @@ internal static class IrcxAuthServer
 			// On failure, clean up the old context.
 			{
 				var old = session.Context;
-				_ = IrcxSspiNative.DeleteSecurityContext(&old);
+				_ = IrcxSspiNative.DeleteSecurityContext(ref old);
 				session.Dispose();
 				session.Reset();
 			}
@@ -247,56 +248,138 @@ internal static class IrcxAuthServer
 		throw new InvalidOperationException("Unsupported stage");
 	}
 
-	private static unsafe (int Rc, IrcxSspiNative.CtxtHandle NewContext, byte[] OutToken) Accept(
+	private static (int Rc, IrcxSspiNative.CtxtHandle NewContext, byte[] OutToken) Accept(
 		IrcxSspiNative.CredHandle cred,
-		IrcxSspiNative.CtxtHandle* context,
+		IrcxSspiNative.CtxtHandle? context,
 		byte[] tokenBytes,
 		bool includePkgParams)
 	{
 		IrcxSspiNative.CtxtHandle newCtx = default;
 		uint attrs = 0;
-		var rc = 0;
-		var actualLen = 0;
+		nuint expiry = 0;
+		const int outCapacity = 4096;
 
-		var inputBuffersCount = includePkgParams ? 3 : 1;
-		Span<IrcxSspiNative.SecBuffer> inBuffers = stackalloc IrcxSspiNative.SecBuffer[inputBuffersCount];
-		Span<byte> hostBytes = stackalloc byte["localhost".Length + 1];
-		"localhost"u8.CopyTo(hostBytes);
-		hostBytes[^1] = 0;
-		Span<byte> compat = stackalloc byte[1];
-		compat[0] = 1;
+		var tokenPtr = IntPtr.Zero;
+		var outTokenPtr = IntPtr.Zero;
+		var hostPtr = IntPtr.Zero;
+		var compatPtr = IntPtr.Zero;
+		var inBuffersPtr = IntPtr.Zero;
+		var outBuffersPtr = IntPtr.Zero;
+		var inDescPtr = IntPtr.Zero;
+		var outDescPtr = IntPtr.Zero;
+		var contextPtr = IntPtr.Zero;
 
-		var outToken = new byte[4096];
-
-		fixed (byte* tokenPtr = tokenBytes)
-		fixed (byte* outPtr = outToken)
-		fixed (byte* hostPtr = hostBytes)
-		fixed (byte* compatPtr = compat)
+		try
 		{
-			inBuffers[0] = new IrcxSspiNative.SecBuffer { BufferType = IrcxSspiNative.SECBUFFER_TOKEN, cbBuffer = (uint)tokenBytes.Length, pvBuffer = tokenPtr };
+			tokenPtr = Marshal.AllocHGlobal(tokenBytes.Length);
+			if (tokenBytes.Length > 0)
+				Marshal.Copy(tokenBytes, 0, tokenPtr, tokenBytes.Length);
+
+			outTokenPtr = Marshal.AllocHGlobal(outCapacity);
+
+			var inputBuffersCount = includePkgParams ? 3 : 1;
+			var inBuffers = new IrcxSspiNative.SecBuffer[inputBuffersCount];
+			inBuffers[0] = new IrcxSspiNative.SecBuffer
+			{
+				BufferType = IrcxSspiNative.SECBUFFER_TOKEN,
+				cbBuffer = (uint)tokenBytes.Length,
+				pvBuffer = tokenPtr,
+			};
+
 			if (includePkgParams)
 			{
-				inBuffers[1] = new IrcxSspiNative.SecBuffer { BufferType = IrcxSspiNative.SECBUFFER_PKG_PARAMS, cbBuffer = (uint)(hostBytes.Length - 1), pvBuffer = hostPtr };
-				inBuffers[2] = new IrcxSspiNative.SecBuffer { BufferType = IrcxSspiNative.SECBUFFER_PKG_PARAMS, cbBuffer = 1, pvBuffer = compatPtr };
-			}
+				var hostBytes = Encoding.ASCII.GetBytes("localhost");
+				hostPtr = Marshal.AllocHGlobal(hostBytes.Length + 1);
+				Marshal.Copy(hostBytes, 0, hostPtr, hostBytes.Length);
+				Marshal.WriteByte(hostPtr, hostBytes.Length, 0);
 
-			fixed (IrcxSspiNative.SecBuffer* pIn = inBuffers)
-			{
-				var inDesc = new IrcxSspiNative.SecBufferDesc { ulVersion = IrcxSspiNative.SECBUFFER_VERSION, cBuffers = (uint)inputBuffersCount, pBuffers = pIn };
-				Span<IrcxSspiNative.SecBuffer> outBuffers = stackalloc IrcxSspiNative.SecBuffer[1];
-				outBuffers[0] = new IrcxSspiNative.SecBuffer { BufferType = IrcxSspiNative.SECBUFFER_TOKEN, cbBuffer = (uint)outToken.Length, pvBuffer = outPtr };
-				fixed (IrcxSspiNative.SecBuffer* pOut = outBuffers)
+				compatPtr = Marshal.AllocHGlobal(1);
+				Marshal.WriteByte(compatPtr, 0, 1);
+
+				inBuffers[1] = new IrcxSspiNative.SecBuffer
 				{
-					var outDesc = new IrcxSspiNative.SecBufferDesc { ulVersion = IrcxSspiNative.SECBUFFER_VERSION, cBuffers = 1, pBuffers = pOut };
-					rc = IrcxSspiNative.AcceptSecurityContext(&cred, context, &inDesc, 0, IrcxSspiNative.SECURITY_NATIVE_DREP, &newCtx, &outDesc, &attrs, null);
-					actualLen = (int)outBuffers[0].cbBuffer;
-				}
+					BufferType = IrcxSspiNative.SECBUFFER_PKG_PARAMS,
+					cbBuffer = (uint)hostBytes.Length,
+					pvBuffer = hostPtr,
+				};
+				inBuffers[2] = new IrcxSspiNative.SecBuffer
+				{
+					BufferType = IrcxSspiNative.SECBUFFER_PKG_PARAMS,
+					cbBuffer = 1,
+					pvBuffer = compatPtr,
+				};
 			}
-		}
 
-		if (actualLen < 0) actualLen = 0;
-		Array.Resize(ref outToken, actualLen);
-		return (rc, newCtx, outToken);
+			inBuffersPtr = Marshal.AllocHGlobal(Marshal.SizeOf<IrcxSspiNative.SecBuffer>() * inputBuffersCount);
+			for (var i = 0; i < inputBuffersCount; i++)
+			{
+				Marshal.StructureToPtr(inBuffers[i], IntPtr.Add(inBuffersPtr, i * Marshal.SizeOf<IrcxSspiNative.SecBuffer>()), false);
+			}
+
+			var outBuffer = new IrcxSspiNative.SecBuffer
+			{
+				BufferType = IrcxSspiNative.SECBUFFER_TOKEN,
+				cbBuffer = outCapacity,
+				pvBuffer = outTokenPtr,
+			};
+			outBuffersPtr = Marshal.AllocHGlobal(Marshal.SizeOf<IrcxSspiNative.SecBuffer>());
+			Marshal.StructureToPtr(outBuffer, outBuffersPtr, false);
+
+			var inDesc = new IrcxSspiNative.SecBufferDesc
+			{
+				ulVersion = IrcxSspiNative.SECBUFFER_VERSION,
+				cBuffers = (uint)inputBuffersCount,
+				pBuffers = inBuffersPtr,
+			};
+			var outDesc = new IrcxSspiNative.SecBufferDesc
+			{
+				ulVersion = IrcxSspiNative.SECBUFFER_VERSION,
+				cBuffers = 1,
+				pBuffers = outBuffersPtr,
+			};
+
+			inDescPtr = Marshal.AllocHGlobal(Marshal.SizeOf<IrcxSspiNative.SecBufferDesc>());
+			Marshal.StructureToPtr(inDesc, inDescPtr, false);
+			outDescPtr = Marshal.AllocHGlobal(Marshal.SizeOf<IrcxSspiNative.SecBufferDesc>());
+			Marshal.StructureToPtr(outDesc, outDescPtr, false);
+
+			if (context.HasValue)
+			{
+				contextPtr = Marshal.AllocHGlobal(Marshal.SizeOf<IrcxSspiNative.CtxtHandle>());
+				Marshal.StructureToPtr(context.Value, contextPtr, false);
+			}
+
+			var rc = IrcxSspiNative.AcceptSecurityContext(
+				ref cred,
+				contextPtr,
+				inDescPtr,
+				0,
+				IrcxSspiNative.SECURITY_NATIVE_DREP,
+				ref newCtx,
+				outDescPtr,
+				ref attrs,
+				ref expiry);
+
+			var outSecBuffer = Marshal.PtrToStructure<IrcxSspiNative.SecBuffer>(outBuffersPtr);
+			var actualLen = Math.Clamp((int)outSecBuffer.cbBuffer, 0, outCapacity);
+			var outToken = new byte[actualLen];
+			if (actualLen > 0)
+				Marshal.Copy(outTokenPtr, outToken, 0, actualLen);
+
+			return (rc, newCtx, outToken);
+		}
+		finally
+		{
+			if (contextPtr != IntPtr.Zero) Marshal.FreeHGlobal(contextPtr);
+			if (inDescPtr != IntPtr.Zero) Marshal.FreeHGlobal(inDescPtr);
+			if (outDescPtr != IntPtr.Zero) Marshal.FreeHGlobal(outDescPtr);
+			if (inBuffersPtr != IntPtr.Zero) Marshal.FreeHGlobal(inBuffersPtr);
+			if (outBuffersPtr != IntPtr.Zero) Marshal.FreeHGlobal(outBuffersPtr);
+			if (compatPtr != IntPtr.Zero) Marshal.FreeHGlobal(compatPtr);
+			if (hostPtr != IntPtr.Zero) Marshal.FreeHGlobal(hostPtr);
+			if (outTokenPtr != IntPtr.Zero) Marshal.FreeHGlobal(outTokenPtr);
+			if (tokenPtr != IntPtr.Zero) Marshal.FreeHGlobal(tokenPtr);
+		}
 	}
 
 	private static bool TryParseAuthLine(ReadOnlySpan<byte> line, out string package, out char stage, out byte[] payload)
