@@ -1,14 +1,12 @@
 ﻿using System;
 using System.Threading;
 using System.Threading.Tasks;
-using IrcxSspi.Native;
 using IrcxSspi.Server;
 
 const int Port = 6667;
 
 try
 {
-	IrcxSspiModule.Initialize();
 	Console.WriteLine($"Initializing IRCX SSPI test server...");
 
 	using var cts = new CancellationTokenSource();
